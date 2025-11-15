@@ -382,14 +382,14 @@ async def available(ctx: commands.Context, *args: str):
         if s_sprite is True:
             sprite_status = "✅ **Available**"
         elif s_sprite is False:
-            sprite_status = "❌ **Not available**"
+            sprite_status = "☑️ **Claimed**"
         else:
             sprite_status = "⚪ **Unknown**"
 
         if s_splash is True:
             splash_status = "✅ **Available**"
         elif s_splash is False:
-            splash_status = "❌ **Not available**"
+            splash_status = "☑️ **Claimed**"
         else:
             splash_status = "⚪ **Unknown**"
 
@@ -419,7 +419,7 @@ async def available(ctx: commands.Context, *args: str):
             url=GOOGLE_SHEET_URL,
             color=discord.Color.green() if ig is True else discord.Color.orange(),
         )
-        embed.set_thumbnail(url="https://raw.githubusercontent.com/EitanJoseph/polandball-art-helper/refs/heads/main/profile%20picx.png")
+        embed.set_thumbnail(url="https://polandballgo.com/assets/logo.png")
 
         embed.add_field(name="Sprite", value="\n".join(sprite_lines), inline=True)
         embed.add_field(name="Splash", value="\n".join(splash_lines), inline=True)
@@ -440,9 +440,9 @@ def format_ready_flag(raw: str) -> str:
     if not s:
         return "No status"
     if s in {"y", "yes", "ready", "rdy"}:
-        return "Ready"
+        return "Complete"
     if s in {"n", "no"}:
-        return "Not ready"
+        return "In progress"
     return raw
 
 
