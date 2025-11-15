@@ -338,23 +338,32 @@ async def available(ctx: commands.Context, *args: str):
         )
 
         # Helper to split long lists into multiple embed fields (Discord field limit ~1024 chars)
-        def fields_from_list(name: str, values: List[str]) -> List[Tuple[str, str, bool]]:
+        def fields_from_list(title: str, values: List[str]) -> List[Tuple[str, str, bool]]:
             if not values:
-                return [(name, "(none)", False)]
-            parts: List[str] = []
-            cur = []
-            for v in values:
-                candidate = ", ".join(cur + [v])
-                if len(candidate) > 900:  # leave margin
-                    parts.append(", ".join(cur))
-                    cur = [v]
-                else:
-                    cur.append(v)
-            if cur:
-                parts.append(", ".join(cur))
-            return [(f"{name}", p, False) for p in parts]
+                return [(f"{title} (0)", "_none_", False)]
 
-        embed = discord.Embed(title="Available Balls", color=discord.Color.blue())
+            max_len = 900
+            chunks: List[List[str]] = [[]]
+            for v in sorted(values, key=str.lower):
+                current = chunks[-1]
+                candidate = "\n".join(current + [f"• {v}"])
+                if len(candidate) > max_len:
+                    chunks.append([f"• {v}"])
+                else:
+                    current.append(f"• {v}")
+
+            fields: List[Tuple[str, str, bool]] = []
+            for i, chunk in enumerate(chunks, start=1):
+                name_suffix = f" (page {i})" if len(chunks) > 1 else ""
+                fields.append((f"{title} ({len(values)}){name_suffix}", "\n".join(chunk), False))
+            return fields
+
+
+        embed = discord.Embed(
+            title="Available Characters",
+            description=f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})\nUpdated every {CACHE_TTL_SECS}s",
+            color=discord.Color.blurple(),
+        )
         embed.set_thumbnail(url="https://raw.githubusercontent.com/EitanJoseph/polandball-art-helper/refs/heads/main/profile%20picx.png")
 
         for title, content, inline in fields_from_list("Sprites", sprite_list):
@@ -362,66 +371,79 @@ async def available(ctx: commands.Context, *args: str):
         for title, content, inline in fields_from_list("Splashes", splash_list):
             embed.add_field(name=title, value=content, inline=False)
 
-        # Clickable source link in the embed description
-        embed.description = f"[Sourced from Characters]({GOOGLE_SHEET_URL})\nSource tab: {SHEET_NAME} | Updated every {CACHE_TTL_SECS}s"
         await ctx.reply(embed=embed)
         return
 
     rec, suggestion = idx.find(arg_str)
     if rec:
-        def label(available, artist, rdy):
-            if available is True:
-                return ("✅ AVAILABLE", None)
-            if available is False:
-                rdy_status = "✅ Rdy" if (rdy or "").strip().lower() == "y" else (
-                    "⏳ Not Rdy" if rdy else "❓ No status"
-                )
-                return (f"🎨 {artist or '(unknown)'}", rdy_status)
-            return ("⚠️ Unknown", None)
-
         s_sprite = rec.is_available("sprite")
         s_splash = rec.is_available("splash")
 
-        # Make the character name more prominent: uppercase title. Set the embed
-        # URL so the title becomes clickable. Note: Discord footers do not support
-        # clickable links, so we place a small non-clickable footer and make the
-        # embed title itself open the sheet.
-        embed = discord.Embed(title=rec.country.upper(), color=discord.Color.green(), url=GOOGLE_SHEET_URL)
-        sprite_label, sprite_sub = label(s_sprite, rec.sprite_artist, rec.sprite_rdy)
-        splash_label, splash_sub = label(s_splash, rec.splash_artist, rec.splash_rdy)
+        if s_sprite is True:
+            sprite_status = "✅ **Available**"
+        elif s_sprite is False:
+            sprite_status = "❌ **Not available**"
+        else:
+            sprite_status = "⚪ **Unknown**"
 
-        # In-Game status
+        if s_splash is True:
+            splash_status = "✅ **Available**"
+        elif s_splash is False:
+            splash_status = "❌ **Not available**"
+        else:
+            splash_status = "⚪ **Unknown**"
+
         ig = rec.in_game_status()
         if ig is True:
             ig_text = "🟢 In Game"
         elif ig is False:
             ig_text = "🔴 Not In Game"
         else:
-            ig_text = "⚪ Unknown"
+            ig_text = "⚪ In-game status unknown"
 
-        sprite_value = sprite_label
-        if sprite_sub:
-            sprite_value += f" — {sprite_sub}"
-        splash_value = splash_label
-        if splash_sub:
-            splash_value += f" — {splash_sub}"
+        sprite_lines = [sprite_status]
+        if rec.sprite_artist:
+            sprite_lines.append(f"Artist: `{rec.sprite_artist}`")
+        if rec.sprite_rdy:
+            sprite_lines.append(f"Status: `{format_ready_flag(rec.sprite_rdy)}`")
 
-        # Use a zero-width space as the field name so no title is visible
-        embed.add_field(name="\u200b", value=ig_text, inline=False)
-        embed.add_field(name="Sprite", value=sprite_value, inline=False)
-        embed.add_field(name="Splash", value=splash_value, inline=False)
+        splash_lines = [splash_status]
+        if rec.splash_artist:
+            splash_lines.append(f"Artist: `{rec.splash_artist}`")
+        if rec.splash_rdy:
+            splash_lines.append(f"Status: `{format_ready_flag(rec.splash_rdy)}`")
 
-        # Remove duplicate name; put a small footer (non-clickable) and make the
-        # title clickable via `embed.url` above.
-        embed.description = None
-        embed.set_footer(text="Sourced from Characters")
+        embed = discord.Embed(
+            title=rec.country,
+            description=ig_text,
+            url=GOOGLE_SHEET_URL,
+            color=discord.Color.green() if ig is True else discord.Color.orange(),
+        )
+        embed.set_thumbnail(url="https://raw.githubusercontent.com/EitanJoseph/polandball-art-helper/refs/heads/main/profile%20picx.png")
+
+        embed.add_field(name="Sprite", value="\n".join(sprite_lines), inline=True)
+        embed.add_field(name="Splash", value="\n".join(splash_lines), inline=True)
+
+        embed.set_footer(text=f"Sourced from {SHEET_NAME}")
         await ctx.reply(embed=embed)
         return
 
+
     if suggestion:
-        await ctx.reply(f"I couldn't find that exactly. Did you mean **{suggestion}**?")
+        await ctx.reply(f"I couldn't find that exactly.\nDid you mean **{suggestion}**?")
     else:
         await ctx.reply("I couldn't find that country in the sheet.")
+
+
+def format_ready_flag(raw: str) -> str:
+    s = (raw or "").strip().lower()
+    if not s:
+        return "No status"
+    if s in {"y", "yes", "ready", "rdy"}:
+        return "Ready"
+    if s in {"n", "no"}:
+        return "Not ready"
+    return raw
 
 
 @bot.command(name="ping")
