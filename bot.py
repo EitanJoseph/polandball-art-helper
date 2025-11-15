@@ -57,9 +57,11 @@ from typing import Dict, List, Optional, Tuple
 import discord
 from discord.ext import commands
 
+
 # Google Sheets
 import gspread
 from google.oauth2.service_account import Credentials
+from google.auth import default as google_auth_default
 
 # -----------------------------
 # Configuration & Environment
@@ -113,16 +115,17 @@ class SheetClient:
             "https://www.googleapis.com/auth/spreadsheets.readonly",
             "https://www.googleapis.com/auth/drive.readonly",
         ]
+
         if SERVICE_ACCOUNT_JSON:
             info = json.loads(SERVICE_ACCOUNT_JSON)
             creds = Credentials.from_service_account_info(info, scopes=scopes)
-        else:
-            if not os.path.exists(SERVICE_ACCOUNT_FILE):
-                raise FileNotFoundError(
-                    f"Service account file not found at {SERVICE_ACCOUNT_FILE}. "
-                    "Place your key there or set SERVICE_ACCOUNT_JSON env var."
-                )
+
+        elif SERVICE_ACCOUNT_FILE and os.path.exists(SERVICE_ACCOUNT_FILE):
             creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+
+        else:
+            # Running on Cloud Run → use ADC (service account attached to service)
+            creds, _ = google_auth_default(scopes=scopes)
 
         self.gc = gspread.authorize(creds)
         if not GOOGLE_SHEET_ID:
