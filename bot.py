@@ -55,7 +55,7 @@ from google.auth import default as google_auth_default
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-SHEET_NAME = os.getenv("SHEET_NAME", "Availability")
+SHEET_NAME = os.getenv("SHEET_NAME", "Characters")
 AVAILABLE_VALUES = set(
     v.strip().lower()
     for v in os.getenv("AVAILABLE_VALUES", "y").split(",")
