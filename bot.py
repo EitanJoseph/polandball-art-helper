@@ -337,27 +337,37 @@ async def ping(ctx: commands.Context):
     await ctx.reply("pong")
 
 
-async def handle_client(reader, writer):
-    try:
-        await reader.read(1024)
-        response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
-        writer.write(response)
-        await writer.drain()
-    finally:
-        writer.close()
-        await writer.wait_closed()
+async def start_health_check_server():
+    async def handle_client(reader, writer):
+        try:
+            await reader.readexactly(1)
+            response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
+            writer.write(response)
+            await writer.drain()
+        except asyncio.IncompleteReadError:
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    port = int(os.getenv("PORT", "8080"))
+    server = await asyncio.start_server(handle_client, host="0.0.0.0", port=port)
+    async with server:
+        await server.serve_forever()
 
 
 async def main():
     if not DISCORD_TOKEN:
         raise RuntimeError("DISCORD_TOKEN env var is required.")
-    port = int(os.getenv("PORT", "8080"))
-    server = await asyncio.start_server(handle_client, host="0.0.0.0", port=port)
-    async with server:
-        await asyncio.gather(
-            bot.start(DISCORD_TOKEN),
-            server.serve_forever(),
-        )
+    
+    # Start health check server in background
+    health_task = asyncio.create_task(start_health_check_server())
+    
+    # Start the Discord bot
+    try:
+        await bot.start(DISCORD_TOKEN)
+    finally:
+        health_task.cancel()
 
 
 if __name__ == "__main__":
