@@ -56,6 +56,10 @@ from google.auth import default as google_auth_default
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Characters")
+GOOGLE_SHEET_URL = os.getenv(
+    "GOOGLE_SHEET_URL",
+    "https://docs.google.com/spreadsheets/d/1Sud0s7EbgAfBCHR7w21OmnYF-VcG64O8WGM1ixYoRz0/edit?gid=0#gid=0",
+)
 AVAILABLE_VALUES = set(
     v.strip().lower()
     for v in os.getenv("AVAILABLE_VALUES", "").split(",")
@@ -78,6 +82,7 @@ logger = logging.getLogger("polandball-bot")
 @dataclass
 class CountryRecord:
     country: str
+    in_game: str
     splash_artist: str
     splash_rdy: str
     sprite_artist: str
@@ -92,6 +97,23 @@ class CountryRecord:
         if s in UNAVAILABLE_VALUES:
             return False
         return False  # Any non-empty value (if not in AVAILABLE_VALUES) = unavailable
+
+    def in_game_status(self) -> Optional[bool]:
+        """Return True/False/None for the 'In Game?' column.
+
+        - Returns True if the cell matches `AVAILABLE_VALUES`.
+        - Returns False if it matches `UNAVAILABLE_VALUES`.
+        - Returns None if empty or unknown.
+        """
+        raw = self.in_game
+        if not raw:
+            return None
+        s = raw.strip().lower()
+        if s in AVAILABLE_VALUES:
+            return True
+        if s in UNAVAILABLE_VALUES:
+            return False
+        return None
 
     def is_available(self, kind: str) -> Optional[bool]:
         if kind == "splash":
@@ -144,6 +166,12 @@ class SheetClient:
         records: List[CountryRecord] = []
 
         for row in values[1:]:
+            # Read the "In Game?" column (A) but do NOT filter rows on it.
+            in_game = (
+                row[in_game_i].strip()
+                if in_game_i is not None and in_game_i < len(row)
+                else ""
+            )
 
             country = (
                 row[character_i].strip()
@@ -175,6 +203,7 @@ class SheetClient:
                 records.append(
                     CountryRecord(
                         country=country,
+                        in_game=in_game,
                         splash_artist=splash_artist,
                         splash_rdy=splash_rdy,
                         sprite_artist=sprite_artist,
@@ -296,10 +325,6 @@ async def available(ctx: commands.Context, *args: str):
         await ctx.reply(f"Sorry, I couldn't load the availability sheet: {e}")
         return
 
-    if not args:
-        await ctx.reply('Try `!available ball` or `!available "Country Name"`.')
-        return
-
     arg_str = " ".join(args).strip()
 
     if arg_str.strip().lower() in {"ball", "balls"}:
@@ -337,7 +362,8 @@ async def available(ctx: commands.Context, *args: str):
         for title, content, inline in fields_from_list("Splashes", splash_list):
             embed.add_field(name=title, value=content, inline=False)
 
-        embed.set_footer(text=f"Source: {SHEET_NAME} | Updated every {CACHE_TTL_SECS}s")
+        # Clickable source link in the embed description
+        embed.description = f"[Sourced from Characters]({GOOGLE_SHEET_URL})\nSource tab: {SHEET_NAME} | Updated every {CACHE_TTL_SECS}s"
         await ctx.reply(embed=embed)
         return
 
@@ -356,9 +382,21 @@ async def available(ctx: commands.Context, *args: str):
         s_sprite = rec.is_available("sprite")
         s_splash = rec.is_available("splash")
 
-        embed = discord.Embed(title=rec.country, color=discord.Color.green())
+        # Make the character name more prominent: uppercase title and bold+underlined
+        # name in the description (embed titles are visually larger; description
+        # supports markdown so we emphasize the name there as well).
+        embed = discord.Embed(title=rec.country.upper(), color=discord.Color.green())
         sprite_label, sprite_sub = label(s_sprite, rec.sprite_artist, rec.sprite_rdy)
         splash_label, splash_sub = label(s_splash, rec.splash_artist, rec.splash_rdy)
+
+        # In-Game status
+        ig = rec.in_game_status()
+        if ig is True:
+            ig_text = "🟢 In Game"
+        elif ig is False:
+            ig_text = "🔴 Not In Game"
+        else:
+            ig_text = "⚪ Unknown"
 
         sprite_value = sprite_label
         if sprite_sub:
@@ -367,11 +405,12 @@ async def available(ctx: commands.Context, *args: str):
         if splash_sub:
             splash_value += f" — {splash_sub}"
 
+        embed.add_field(name="In Game", value=ig_text, inline=False)
         embed.add_field(name="Sprite", value=sprite_value, inline=False)
         embed.add_field(name="Splash", value=splash_value, inline=False)
 
-        # Small helpful footer
-        embed.set_footer(text=f"Sourced from tab: {SHEET_NAME}")
+        # Prominent name + clickable source link in the description
+        embed.description = f"**__{rec.country}__**\n\n[Sourced from Characters]({GOOGLE_SHEET_URL})"
         await ctx.reply(embed=embed)
         return
 
