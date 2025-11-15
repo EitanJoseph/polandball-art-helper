@@ -78,10 +78,30 @@ logger = logging.getLogger("polandball-bot")
 @dataclass
 class CountryRecord:
     country: str
-    splash_raw: str
-    sprite_raw: str
+    in_game: str
+    splash_artist: str
+    splash_rdy: str
+    sprite_artist: str
+    sprite_rdy: str
 
     def _parse(self, raw: str) -> Optional[bool]:
+        if not raw:
+            return True  # Empty = available
+        s = raw.strip().lower()
+        if s in AVAILABLE_VALUES:
+            return True
+        if s in UNAVAILABLE_VALUES:
+            return False
+        return False  # Any non-empty value (if not in AVAILABLE_VALUES) = unavailable
+
+    def in_game_status(self) -> Optional[bool]:
+        """Return True/False/None for the 'In Game?' column.
+
+        - Returns True if the cell matches `AVAILABLE_VALUES`.
+        - Returns False if it matches `UNAVAILABLE_VALUES`.
+        - Returns None if empty or unknown.
+        """
+        raw = self.in_game
         if not raw:
             return None
         s = raw.strip().lower()
@@ -93,9 +113,9 @@ class CountryRecord:
 
     def is_available(self, kind: str) -> Optional[bool]:
         if kind == "splash":
-            return self._parse(self.splash_raw)
+            return self._parse(self.splash_artist)
         if kind == "sprite":
-            return self._parse(self.sprite_raw)
+            return self._parse(self.sprite_artist)
         return None
 
 
@@ -220,13 +240,30 @@ class AvailabilityIndex:
 
     def find(self, query: str) -> Tuple[Optional[CountryRecord], Optional[str]]:
         q = normalize_country(query)
+        logger.debug("AvailabilityIndex.find: query=%r normalized=%r", query, q)
+        if not q:
+            return None, None
+
+        # Exact normalized match
         if q in self.by_norm:
             return self.by_norm[q], None
         candidates = difflib.get_close_matches(q, self.by_norm.keys(), n=1, cutoff=0.75)
         if candidates:
             best = candidates[0]
-            suggestion = self.by_norm[best].country
-            return None, suggestion
+            return None, self.by_norm[best].country
+
+        # Try matching against normalized original names with a slightly lower cutoff
+        norm_map = {normalize_country(n): n for n in self.all_names if normalize_country(n)}
+        candidates2 = difflib.get_close_matches(q, list(norm_map.keys()), n=1, cutoff=0.6)
+        if candidates2:
+            return None, norm_map[candidates2[0]]
+
+        # Fallback: substring match
+        for k in keys:
+            if q in k or k in q:
+                return None, self.by_norm[k].country
+
+        logger.info("AvailabilityIndex.find: no match for query=%r normalized=%r (keys=%d)", query, q, len(keys))
         return None, None
 
 
@@ -237,6 +274,7 @@ class PolandballBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         self.sheet_client: Optional[SheetClient] = None
         self.cache = Cache(ttl=CACHE_TTL_SECS)
+        self._command_lock = False
 
     async def on_ready(self):
         logger.info("Logged in as %s (id=%s)", self.user, self.user.id)
@@ -265,10 +303,6 @@ async def available(ctx: commands.Context, *args: str):
         await ctx.reply(f"Sorry, I couldn't load the availability sheet: {e}")
         return
 
-    if not args:
-        await ctx.reply('Try `!available ball` or `!available "Country Name"`.')
-        return
-
     arg_str = " ".join(args).strip()
 
     if arg_str.strip().lower() in {"ball", "balls"}:
@@ -288,6 +322,14 @@ async def available(ctx: commands.Context, *args: str):
             f"🎨 **Sprites available:** {fmt(sprite_list)}\n\n"
             f"🖼️ **Splash art available:** {fmt(splash_list)}"
         )
+        embed.set_thumbnail(url="https://raw.githubusercontent.com/EitanJoseph/polandball-art-helper/refs/heads/main/profile%20picx.png")
+
+        for title, content, inline in fields_from_list("Sprites", sprite_list):
+            embed.add_field(name=title, value=content, inline=False)
+        for title, content, inline in fields_from_list("Splashes", splash_list):
+            embed.add_field(name=title, value=content, inline=False)
+
+        await ctx.reply(embed=embed)
         return
 
     rec, suggestion = idx.find(arg_str)
@@ -302,15 +344,58 @@ async def available(ctx: commands.Context, *args: str):
         s_sprite = rec.is_available("sprite")
         s_splash = rec.is_available("splash")
 
-        await ctx.reply(
-            f"**{rec.country}**\n"
-            f"• Sprite: {label(s_sprite, rec.sprite_raw)}\n"
-            f"• Splash: {label(s_splash, rec.splash_raw)}"
+        if s_sprite is True:
+            sprite_status = "✅ **Available**"
+        elif s_sprite is False:
+            sprite_status = "☑️ **Claimed**"
+        else:
+            sprite_status = "⚪ **Unknown**"
+
+        if s_splash is True:
+            splash_status = "✅ **Available**"
+        elif s_splash is False:
+            splash_status = "☑️ **Claimed**"
+        else:
+            splash_status = "⚪ **Unknown**"
+
+        ig = rec.in_game_status()
+        if ig is True:
+            ig_text = "🟢 In Game"
+        elif ig is False:
+            ig_text = "🔴 Not In Game"
+        else:
+            ig_text = "⚪ In-game status unknown"
+
+        sprite_lines = [sprite_status]
+        if rec.sprite_artist:
+            sprite_lines.append(f"Artist: `{rec.sprite_artist}`")
+        if rec.sprite_rdy:
+            sprite_lines.append(f"Status: `{format_ready_flag(rec.sprite_rdy)}`")
+
+        splash_lines = [splash_status]
+        if rec.splash_artist:
+            splash_lines.append(f"Artist: `{rec.splash_artist}`")
+        if rec.splash_rdy:
+            splash_lines.append(f"Status: `{format_ready_flag(rec.splash_rdy)}`")
+
+        embed = discord.Embed(
+            title=rec.country,
+            description=ig_text,
+            url=GOOGLE_SHEET_URL,
+            color=discord.Color.light_grey() if ig is True else discord.Color.green(),
         )
+        embed.set_thumbnail(url="https://polandballgo.com/assets/logo.png")
+
+        embed.add_field(name="Sprite", value="\n".join(sprite_lines), inline=True)
+        embed.add_field(name="Splash", value="\n".join(splash_lines), inline=True)
+
+        embed.set_footer(text=f"Sourced from {SHEET_NAME}")
+        await ctx.reply(embed=embed)
         return
 
+
     if suggestion:
-        await ctx.reply(f"I couldn't find that exactly. Did you mean **{suggestion}**?")
+        await ctx.reply(f"I couldn't find that exactly.\nDid you mean **{suggestion}**?")
     else:
         await ctx.reply("I couldn't find that country in the sheet.")
 
