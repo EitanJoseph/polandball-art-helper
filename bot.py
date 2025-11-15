@@ -58,12 +58,12 @@ GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Characters")
 AVAILABLE_VALUES = set(
     v.strip().lower()
-    for v in os.getenv("AVAILABLE_VALUES", "y").split(",")
+    for v in os.getenv("AVAILABLE_VALUES", "").split(",")
     if v.strip()
 )
 UNAVAILABLE_VALUES = set(
     v.strip().lower()
-    for v in os.getenv("UNAVAILABLE_VALUES", "n").split(",")
+    for v in os.getenv("UNAVAILABLE_VALUES", "").split(",")
     if v.strip()
 )
 CACHE_TTL_SECS = int(os.getenv("CACHE_TTL_SECS", "60"))
@@ -83,13 +83,13 @@ class CountryRecord:
 
     def _parse(self, raw: str) -> Optional[bool]:
         if not raw:
-            return None
+            return True  # Empty = available
         s = raw.strip().lower()
         if s in AVAILABLE_VALUES:
             return True
         if s in UNAVAILABLE_VALUES:
             return False
-        return None
+        return False  # Any non-empty value (if not in AVAILABLE_VALUES) = unavailable
 
     def is_available(self, kind: str) -> Optional[bool]:
         if kind == "splash":
@@ -134,8 +134,8 @@ class SheetClient:
 
         in_game_i = col_letter_to_index("A")
         character_i = col_letter_to_index("B")
-        splash_rdy_i = col_letter_to_index("D")
-        sprite_rdy_i = col_letter_to_index("F")
+        splash_rdy_i = col_letter_to_index("C")
+        sprite_rdy_i = col_letter_to_index("E")
 
         records: List[CountryRecord] = []
 
