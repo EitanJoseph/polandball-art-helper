@@ -55,19 +55,15 @@ from google.auth import default as google_auth_default
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-SHEET_NAME = os.getenv("SHEET_NAME", "Characters")
-GOOGLE_SHEET_URL = os.getenv(
-    "GOOGLE_SHEET_URL",
-    "https://docs.google.com/spreadsheets/d/1Sud0s7EbgAfBCHR7w21OmnYF-VcG64O8WGM1ixYoRz0/edit?gid=0#gid=0",
-)
+SHEET_NAME = os.getenv("SHEET_NAME", "Availability")
 AVAILABLE_VALUES = set(
     v.strip().lower()
-    for v in os.getenv("AVAILABLE_VALUES", "").split(",")
+    for v in os.getenv("AVAILABLE_VALUES", "y").split(",")
     if v.strip()
 )
 UNAVAILABLE_VALUES = set(
     v.strip().lower()
-    for v in os.getenv("UNAVAILABLE_VALUES", "").split(",")
+    for v in os.getenv("UNAVAILABLE_VALUES", "n").split(",")
     if v.strip()
 )
 CACHE_TTL_SECS = int(os.getenv("CACHE_TTL_SECS", "60"))
@@ -158,42 +154,31 @@ class SheetClient:
 
         in_game_i = col_letter_to_index("A")
         character_i = col_letter_to_index("B")
-        splash_artist_i = col_letter_to_index("C")
         splash_rdy_i = col_letter_to_index("D")
-        sprite_artist_i = col_letter_to_index("E")
         sprite_rdy_i = col_letter_to_index("F")
 
         records: List[CountryRecord] = []
 
         for row in values[1:]:
-            # Read the "In Game?" column (A) but do NOT filter rows on it.
             in_game = (
-                row[in_game_i].strip()
+                row[in_game_i].strip().lower()
                 if in_game_i is not None and in_game_i < len(row)
                 else ""
             )
+            if in_game in UNAVAILABLE_VALUES:
+                continue
 
             country = (
                 row[character_i].strip()
                 if character_i is not None and character_i < len(row)
                 else ""
             )
-            splash_artist = (
-                row[splash_artist_i].strip()
-                if splash_artist_i is not None and splash_artist_i < len(row)
-                else ""
-            )
-            splash_rdy = (
+            splash = (
                 row[splash_rdy_i].strip()
                 if splash_rdy_i is not None and splash_rdy_i < len(row)
                 else ""
             )
-            sprite_artist = (
-                row[sprite_artist_i].strip()
-                if sprite_artist_i is not None and sprite_artist_i < len(row)
-                else ""
-            )
-            sprite_rdy = (
+            sprite = (
                 row[sprite_rdy_i].strip()
                 if sprite_rdy_i is not None and sprite_rdy_i < len(row)
                 else ""
@@ -203,11 +188,8 @@ class SheetClient:
                 records.append(
                     CountryRecord(
                         country=country,
-                        in_game=in_game,
-                        splash_artist=splash_artist,
-                        splash_rdy=splash_rdy,
-                        sprite_artist=sprite_artist,
-                        sprite_rdy=sprite_rdy,
+                        splash_raw=splash,
+                        sprite_raw=sprite,
                     )
                 )
         return records
@@ -265,11 +247,7 @@ class AvailabilityIndex:
         # Exact normalized match
         if q in self.by_norm:
             return self.by_norm[q], None
-
-        keys = list(self.by_norm.keys())
-
-        # Try a close fuzzy match on normalized keys first (higher cutoff)
-        candidates = difflib.get_close_matches(q, keys, n=1, cutoff=0.75)
+        candidates = difflib.get_close_matches(q, self.by_norm.keys(), n=1, cutoff=0.75)
         if candidates:
             best = candidates[0]
             return None, self.by_norm[best].country
@@ -337,32 +315,12 @@ async def available(ctx: commands.Context, *args: str):
             key=str.lower,
         )
 
-        # Helper to split long lists into multiple embed fields (Discord field limit ~1024 chars)
-        def fields_from_list(title: str, values: List[str]) -> List[Tuple[str, str, bool]]:
-            if not values:
-                return [(f"{title} (0)", "_none_", False)]
+        def fmt(lst):
+            return "(none)" if not lst else ", ".join(lst)
 
-            max_len = 900
-            chunks: List[List[str]] = [[]]
-            for v in sorted(values, key=str.lower):
-                current = chunks[-1]
-                candidate = "\n".join(current + [f"• {v}"])
-                if len(candidate) > max_len:
-                    chunks.append([f"• {v}"])
-                else:
-                    current.append(f"• {v}")
-
-            fields: List[Tuple[str, str, bool]] = []
-            for i, chunk in enumerate(chunks, start=1):
-                name_suffix = f" (page {i})" if len(chunks) > 1 else ""
-                fields.append((f"{title} ({len(values)}){name_suffix}", "\n".join(chunk), False))
-            return fields
-
-
-        embed = discord.Embed(
-            title="Available Characters",
-            description=f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})\nUpdated every {CACHE_TTL_SECS}s",
-            color=discord.Color.blurple(),
+        await ctx.reply(
+            f"🎨 **Sprites available:** {fmt(sprite_list)}\n\n"
+            f"🖼️ **Splash art available:** {fmt(splash_list)}"
         )
         embed.set_thumbnail(url="https://raw.githubusercontent.com/EitanJoseph/polandball-art-helper/refs/heads/main/profile%20picx.png")
 
@@ -376,6 +334,13 @@ async def available(ctx: commands.Context, *args: str):
 
     rec, suggestion = idx.find(arg_str)
     if rec:
+        def label(v, raw):
+            if v is True:
+                return "✅ AVAILABLE"
+            if v is False:
+                return "❌ NOT available"
+            return f"⚠️ Unknown (`{raw}`)"
+
         s_sprite = rec.is_available("sprite")
         s_splash = rec.is_available("splash")
 
@@ -435,53 +400,32 @@ async def available(ctx: commands.Context, *args: str):
         await ctx.reply("I couldn't find that country in the sheet.")
 
 
-def format_ready_flag(raw: str) -> str:
-    s = (raw or "").strip().lower()
-    if not s:
-        return "No status"
-    if s in {"y", "yes", "ready", "rdy"}:
-        return "Complete"
-    if s in {"n", "no"}:
-        return "In progress"
-    return raw
-
-
 @bot.command(name="ping")
 async def ping(ctx: commands.Context):
     await ctx.reply("pong")
 
 
-async def start_health_check_server():
-    async def handle_client(reader, writer):
-        try:
-            await reader.readexactly(1)
-            response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
-            writer.write(response)
-            await writer.drain()
-        except asyncio.IncompleteReadError:
-            pass
-        finally:
-            writer.close()
-            await writer.wait_closed()
-
-    port = int(os.getenv("PORT", "8080"))
-    server = await asyncio.start_server(handle_client, host="0.0.0.0", port=port)
-    async with server:
-        await server.serve_forever()
+async def handle_client(reader, writer):
+    try:
+        await reader.read(1024)
+        response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
+        writer.write(response)
+        await writer.drain()
+    finally:
+        writer.close()
+        await writer.wait_closed()
 
 
 async def main():
     if not DISCORD_TOKEN:
         raise RuntimeError("DISCORD_TOKEN env var is required.")
-    
-    # Start health check server in background
-    health_task = asyncio.create_task(start_health_check_server())
-    
-    # Start the Discord bot
-    try:
-        await bot.start(DISCORD_TOKEN)
-    finally:
-        health_task.cancel()
+    port = int(os.getenv("PORT", "8080"))
+    server = await asyncio.start_server(handle_client, host="0.0.0.0", port=port)
+    async with server:
+        await asyncio.gather(
+            bot.start(DISCORD_TOKEN),
+            server.serve_forever(),
+        )
 
 
 if __name__ == "__main__":
