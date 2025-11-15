@@ -236,13 +236,34 @@ class AvailabilityIndex:
 
     def find(self, query: str) -> Tuple[Optional[CountryRecord], Optional[str]]:
         q = normalize_country(query)
+        logger.debug("AvailabilityIndex.find: query=%r normalized=%r", query, q)
+        if not q:
+            return None, None
+
+        # Exact normalized match
         if q in self.by_norm:
             return self.by_norm[q], None
-        candidates = difflib.get_close_matches(q, self.by_norm.keys(), n=1, cutoff=0.75)
+
+        keys = list(self.by_norm.keys())
+
+        # Try a close fuzzy match on normalized keys first (higher cutoff)
+        candidates = difflib.get_close_matches(q, keys, n=1, cutoff=0.75)
         if candidates:
             best = candidates[0]
-            suggestion = self.by_norm[best].country
-            return None, suggestion
+            return None, self.by_norm[best].country
+
+        # Try matching against normalized original names with a slightly lower cutoff
+        norm_map = {normalize_country(n): n for n in self.all_names if normalize_country(n)}
+        candidates2 = difflib.get_close_matches(q, list(norm_map.keys()), n=1, cutoff=0.6)
+        if candidates2:
+            return None, norm_map[candidates2[0]]
+
+        # Fallback: substring match
+        for k in keys:
+            if q in k or k in q:
+                return None, self.by_norm[k].country
+
+        logger.info("AvailabilityIndex.find: no match for query=%r normalized=%r (keys=%d)", query, q, len(keys))
         return None, None
 
 
@@ -253,6 +274,7 @@ class PolandballBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         self.sheet_client: Optional[SheetClient] = None
         self.cache = Cache(ttl=CACHE_TTL_SECS)
+        self._command_lock = False
 
     async def on_ready(self):
         logger.info("Logged in as %s (id=%s)", self.user, self.user.id)
@@ -297,33 +319,67 @@ async def available(ctx: commands.Context, *args: str):
             key=str.lower,
         )
 
-        def fmt(lst):
-            return "(none)" if not lst else ", ".join(lst)
+        # Helper to split long lists into multiple embed fields (Discord field limit ~1024 chars)
+        def fields_from_list(name: str, values: List[str]) -> List[Tuple[str, str, bool]]:
+            if not values:
+                return [(name, "(none)", False)]
+            parts: List[str] = []
+            cur = []
+            for v in values:
+                candidate = ", ".join(cur + [v])
+                if len(candidate) > 900:  # leave margin
+                    parts.append(", ".join(cur))
+                    cur = [v]
+                else:
+                    cur.append(v)
+            if cur:
+                parts.append(", ".join(cur))
+            return [(f"{name}", p, False) for p in parts]
 
-        await ctx.reply(
-            f"🎨 **Sprites available:** {fmt(sprite_list)}\n\n"
-            f"🖼️ **Splash art available:** {fmt(splash_list)}"
-        )
+        embed = discord.Embed(title="Available Balls", color=discord.Color.blue())
+        embed.set_thumbnail(url="https://raw.githubusercontent.com/EitanJoseph/polandball-art-helper/refs/heads/main/profile%20picx.png")
+
+        for title, content, inline in fields_from_list("Sprites", sprite_list):
+            embed.add_field(name=title, value=content, inline=False)
+        for title, content, inline in fields_from_list("Splashes", splash_list):
+            embed.add_field(name=title, value=content, inline=False)
+
+        embed.set_footer(text=f"Source: {SHEET_NAME} | Updated every {CACHE_TTL_SECS}s")
+        await ctx.reply(embed=embed)
         return
 
     rec, suggestion = idx.find(arg_str)
     if rec:
         def label(available, artist, rdy):
             if available is True:
-                return "✅ AVAILABLE"
+                return ("✅ AVAILABLE", None)
             if available is False:
-                rdy_status = "✅ Rdy" if rdy.lower() == "y" else "⏳ Not Rdy" if rdy else "❓ No status"
-                return f"🎨 {artist} ({rdy_status})"
-            return "⚠️ Unknown"
+                rdy_status = "✅ Rdy" if (rdy or "").strip().lower() == "y" else (
+                    "⏳ Not Rdy" if rdy else "❓ No status"
+                )
+                return (f"🎨 {artist or '(unknown)'}", rdy_status)
+            return ("⚠️ Unknown", None)
 
         s_sprite = rec.is_available("sprite")
         s_splash = rec.is_available("splash")
 
-        await ctx.reply(
-            f"**{rec.country}**\n"
-            f"• Sprite: {label(s_sprite, rec.sprite_artist, rec.sprite_rdy)}\n"
-            f"• Splash: {label(s_splash, rec.splash_artist, rec.splash_rdy)}"
-        )
+        embed = discord.Embed(title=rec.country, color=discord.Color.green())
+        sprite_label, sprite_sub = label(s_sprite, rec.sprite_artist, rec.sprite_rdy)
+        splash_label, splash_sub = label(s_splash, rec.splash_artist, rec.splash_rdy)
+
+        sprite_value = sprite_label
+        if sprite_sub:
+            sprite_value += f" — {sprite_sub}"
+        splash_value = splash_label
+        if splash_sub:
+            splash_value += f" — {splash_sub}"
+
+        embed.add_field(name="Sprite", value=sprite_value, inline=False)
+        embed.add_field(name="Splash", value=splash_value, inline=False)
+
+        # Small helpful footer
+        embed.set_footer(text=f"Sourced from tab: {SHEET_NAME}")
+        await ctx.reply(embed=embed)
         return
 
     if suggestion:
