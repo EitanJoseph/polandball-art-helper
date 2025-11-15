@@ -59,7 +59,11 @@ from google.auth import default as google_auth_default
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-SHEET_NAME = os.getenv("SHEET_NAME", "Availability")
+SHEET_NAME = os.getenv("SHEET_NAME", "Characters")
+GOOGLE_SHEET_URL = os.getenv(
+    "GOOGLE_SHEET_URL",
+    "https://docs.google.com/spreadsheets/d/1Sud0s7EbgAfBCHR7w21OmnYF-VcG64O8WGM1ixYoRz0/edit?gid=0#gid=0",
+)
 AVAILABLE_VALUES = set(
     v.strip().lower()
     for v in os.getenv("AVAILABLE_VALUES", "y").split(",")
@@ -158,31 +162,41 @@ class SheetClient:
 
         in_game_i = col_letter_to_index("A")
         character_i = col_letter_to_index("B")
+        splash_artist_i = col_letter_to_index("C")
         splash_rdy_i = col_letter_to_index("D")
+        sprite_artist_i = col_letter_to_index("E")
         sprite_rdy_i = col_letter_to_index("F")
 
         records: List[CountryRecord] = []
 
         for row in values[1:]:
             in_game = (
-                row[in_game_i].strip().lower()
+                row[in_game_i].strip()
                 if in_game_i is not None and in_game_i < len(row)
                 else ""
             )
-            if in_game in UNAVAILABLE_VALUES:
-                continue
 
             country = (
                 row[character_i].strip()
                 if character_i is not None and character_i < len(row)
                 else ""
             )
-            splash = (
+            splash_artist = (
+                row[splash_artist_i].strip()
+                if splash_artist_i is not None and splash_artist_i < len(row)
+                else ""
+            )
+            splash_rdy = (
                 row[splash_rdy_i].strip()
                 if splash_rdy_i is not None and splash_rdy_i < len(row)
                 else ""
             )
-            sprite = (
+            sprite_artist = (
+                row[sprite_artist_i].strip()
+                if sprite_artist_i is not None and sprite_artist_i < len(row)
+                else ""
+            )
+            sprite_rdy = (
                 row[sprite_rdy_i].strip()
                 if sprite_rdy_i is not None and sprite_rdy_i < len(row)
                 else ""
@@ -192,8 +206,11 @@ class SheetClient:
                 records.append(
                     CountryRecord(
                         country=country,
-                        splash_raw=splash,
-                        sprite_raw=sprite,
+                        in_game=in_game,
+                        splash_artist=splash_artist,
+                        splash_rdy=splash_rdy,
+                        sprite_artist=sprite_artist,
+                        sprite_rdy=sprite_rdy,
                     )
                 )
         return records
@@ -251,7 +268,10 @@ class AvailabilityIndex:
         # Exact normalized match
         if q in self.by_norm:
             return self.by_norm[q], None
-        candidates = difflib.get_close_matches(q, self.by_norm.keys(), n=1, cutoff=0.75)
+        
+        keys = list(self.by_norm.keys())
+        
+        candidates = difflib.get_close_matches(q, keys, n=1, cutoff=0.75)
         if candidates:
             best = candidates[0]
             return None, self.by_norm[best].country
@@ -326,12 +346,31 @@ async def available(interaction: discord.Interaction, character: Optional[str] =
             key=str.lower,
         )
 
-        def fmt(lst):
-            return "(none)" if not lst else ", ".join(lst)
+        # Helper to split long lists into multiple embed fields (Discord field limit ~1024 chars)
+        def fields_from_list(title: str, values: List[str]) -> List[Tuple[str, str, bool]]:
+            if not values:
+                return [(f"{title} (0)", "_none_", False)]
 
-        await ctx.reply(
-            f"🎨 **Sprites available:** {fmt(sprite_list)}\n\n"
-            f"🖼️ **Splash art available:** {fmt(splash_list)}"
+            max_len = 900
+            chunks: List[List[str]] = [[]]
+            for v in sorted(values, key=str.lower):
+                current = chunks[-1]
+                candidate = "\n".join(current + [f"• {v}"])
+                if len(candidate) > max_len:
+                    chunks.append([f"• {v}"])
+                else:
+                    current.append(f"• {v}")
+
+            fields: List[Tuple[str, str, bool]] = []
+            for i, chunk in enumerate(chunks, start=1):
+                name_suffix = f" (page {i})" if len(chunks) > 1 else ""
+                fields.append((f"{title} ({len(values)}){name_suffix}", "\n".join(chunk), False))
+            return fields
+
+        embed = discord.Embed(
+            title="Available Characters",
+            description=f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})\nUpdated every {CACHE_TTL_SECS}s",
+            color=discord.Color.blurple(),
         )
         embed.set_thumbnail(url="https://raw.githubusercontent.com/EitanJoseph/polandball-art-helper/refs/heads/main/profile%20picx.png")
 
@@ -345,13 +384,6 @@ async def available(interaction: discord.Interaction, character: Optional[str] =
 
     rec, suggestion = idx.find(arg_str)
     if rec:
-        def label(v, raw):
-            if v is True:
-                return "✅ AVAILABLE"
-            if v is False:
-                return "❌ NOT available"
-            return f"⚠️ Unknown (`{raw}`)"
-
         s_sprite = rec.is_available("sprite")
         s_splash = rec.is_available("splash")
 
@@ -403,7 +435,6 @@ async def available(interaction: discord.Interaction, character: Optional[str] =
         embed.set_footer(text=f"Sourced from {SHEET_NAME}")
         await interaction.followup.send(embed=embed)
         return
-
 
     if suggestion:
         await interaction.followup.send(f"I couldn't find that exactly.\nDid you mean **{suggestion}**?")
