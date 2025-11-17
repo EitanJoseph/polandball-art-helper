@@ -11,3 +11,8 @@ service_account.json
 # OS / editor files
 .DS_Store
 Thumbs.db
+
+.env
+*.env
+
+.vscode/
