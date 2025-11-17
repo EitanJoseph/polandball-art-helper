@@ -13,6 +13,10 @@ Commands (slash commands: /)
 3) /ping
    → Replies with pong.
 
+4) /artist name: "Artist Name" (optional: kind = splash / sprite / both)
+   → Shows all characters whose sprite or splash art was created by the specified artist.
+
+
 Quick Start
 -----------
 1) Python 3.10+
@@ -48,6 +52,8 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
+from enum import Enum
+
 
 import discord
 from discord.ext import commands
@@ -56,6 +62,11 @@ from discord import app_commands
 import gspread
 from google.oauth2.service_account import Credentials
 from google.auth import default as google_auth_default
+
+# For local test only
+# from dotenv import load_dotenv
+# load_dotenv()
+
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
@@ -304,9 +315,14 @@ class PolandballBot(commands.Bot):
         logger.info("Logged in as %s (id=%s)", self.user, self.user.id)
         try:
             synced = await self.tree.sync()
-            logger.info("Synced %d command(s)", len(synced))
+            logger.info(
+                "Synced %d command(s): %s",
+                len(synced),
+                [c.name for c in synced],
+            )
         except Exception as e:
             logger.exception("Failed to sync commands: %s", e)
+
 
     def _load_index(self) -> AvailabilityIndex:
         cached = self.cache.get()
@@ -452,11 +468,195 @@ def format_ready_flag(raw: str) -> str:
         return "In progress"
     return raw
 
+def ready_icon(label: str) -> str:
+    if label == "Complete":
+        return "✅"
+    if label == "In progress":
+        return "⏳"
+    if label == "No status":
+        return "⚪"
+    return "⚪"
 
 @bot.tree.command(name="ping", description="Ping the bot")
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message("pong")
 
+
+class ArtType(Enum):
+    splash = "splash"
+    sprite = "sprite"
+    both = "both"
+
+@bot.tree.command(name="artist", description="Search for all characters done by a given artist")
+@app_commands.describe(
+    name="Artist name (full or partial)",
+    kind="Filter by splash, sprite, or both",
+)
+@app_commands.choices(
+    kind=[
+        app_commands.Choice(name="Both", value="both"),
+        app_commands.Choice(name="Splash only", value="splash"),
+        app_commands.Choice(name="Sprite only", value="sprite"),
+    ]
+)
+async def artist(
+    interaction: discord.Interaction,
+    name: str,
+    kind: app_commands.Choice[str] = None,
+):
+    await interaction.response.defer()
+
+    art_type = (kind.value if kind else "both").lower()
+
+    # Load records (reuse cache logic)
+    try:
+        records = bot.cache.get()
+        if records is None:
+            if bot.sheet_client is None:
+                bot.sheet_client = SheetClient()
+            records = bot.sheet_client.fetch_records()
+            bot.cache.set(records)
+    except Exception as e:
+        logger.exception("Sheet load failed for /artist")
+        await interaction.followup.send(f"Sorry, I couldn't load the sheet: {e}")
+        return
+
+    query = name.strip().lower()
+    if not query:
+        await interaction.followup.send("Please provide at least part of an artist name.")
+        return
+
+    matches_splash: List[CountryRecord] = []
+    matches_sprite: List[CountryRecord] = []
+
+    for r in records:
+        splash_name = (r.splash_artist or "").lower()
+        sprite_name = (r.sprite_artist or "").lower()
+
+        if query in splash_name and splash_name:
+            matches_splash.append(r)
+
+        if query in sprite_name and sprite_name:
+            matches_sprite.append(r)
+
+    if art_type == "splash":
+        matches_sprite = []
+    elif art_type == "sprite":
+        matches_splash = []
+
+    if not matches_splash and not matches_sprite:
+        await interaction.followup.send(
+            f"I couldn't find any characters for an artist matching `{name}`."
+        )
+        return
+
+    embed = discord.Embed(
+        title=f"Art by {name}",
+        description=(
+            f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})\n"
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.set_thumbnail(url="https://polandballgo.com/assets/logo.png")
+
+    def format_list(title: str, recs: List[CountryRecord], get_flag) -> None:
+        if not recs:
+        # consistent bold + count even when empty
+            embed.add_field(
+                name=f"**{title} (0)**",
+                value="_none_",   # italic 'none'
+                inline=False,
+            )
+            return
+
+        recs_sorted = sorted(recs, key=lambda r: r.country.lower())
+
+        buckets = {
+            "Complete": [],
+            "In progress": [],
+            "No status": [],
+            "Other": [],
+        }
+
+        for r in recs_sorted:
+            label = format_ready_flag(get_flag(r))
+            if label not in buckets:
+                buckets["Other"].append(r)
+            else:
+                buckets[label].append(r)
+
+        max_len = 1000  # keep some headroom under Discord's 1024 limit
+        lines: List[str] = []
+        current_len = 0
+        hidden_count = 0
+
+        order = ["Complete", "In progress", "No status", "Other"]
+
+        for label in order:
+            items = buckets[label]
+            if not items:
+                continue
+
+            icon = ready_icon(label)
+            header = f"{icon} **{label} ({len(items)})**"
+
+            # If even the header doesn't fit, bail out
+            if current_len + len(header) + 1 > max_len:
+                hidden_count += sum(len(buckets[l]) for l in order[order.index(label):])
+                break
+
+            lines.append(header)
+            current_len += len(header) + 1  # + newline
+
+            for r in items:
+                line = f"• {r.country}"
+                if current_len + len(line) + 1 > max_len:
+                    # count this item + all remaining items in all remaining buckets
+                    hidden_count += 1  # this one
+                    # remaining in this bucket
+                    remaining_here = len(items) - (items.index(r) + 1)
+                    hidden_count += remaining_here
+                    # remaining in later buckets
+                    for later_label in order[order.index(label) + 1:]:
+                        hidden_count += len(buckets[later_label])
+                    # stop adding lines entirely
+                    break
+                lines.append(line)
+                current_len += len(line) + 1
+            else:
+                # finished this bucket normally -> add a blank line
+                lines.append("")
+                current_len += 1
+                continue  # go to next bucket
+
+            # we broke from the inner loop because of length, so stop outer too
+            break
+
+        # remove trailing blank
+        if lines and lines[-1] == "":
+            lines.pop()
+
+        if hidden_count > 0:
+            lines.append(f"… and {hidden_count} more")
+
+        value = "\n".join(lines)
+
+        embed.add_field(
+            name=f"**{title} ({len(recs_sorted)}**)",  
+            value=value,
+            inline=False,
+        )
+
+
+    if art_type in ("both", "splash"):
+        format_list("*🎨 Splash Art*", matches_splash, lambda r: r.splash_rdy)
+
+    if art_type in ("both", "sprite"):
+        divider = "⠂" * 12
+        embed.add_field(name=divider, value="", inline=False)
+        format_list("*🎨 Sprite Art*", matches_sprite, lambda r: r.sprite_rdy)
+
+    await interaction.followup.send(embed=embed)
 
 async def handle_client(reader, writer):
     try:
