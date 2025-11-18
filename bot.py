@@ -50,6 +50,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
@@ -520,25 +521,80 @@ async def artist(
         logger.exception("Sheet load failed for /artist")
         await interaction.followup.send(f"Sorry, I couldn't load the sheet: {e}")
         return
+    
+    def normalize_name(s: str) -> str:
+        """
+        Normalize artist / query text for fuzzy matching:
+        - Unicode normalize (NFKD)
+        - keep only letters (drop emoji, punctuation, bullets, etc.)
+        - lowercase
+        """
+        if not s:
+            return ""
+        # decompose fancy unicode characters
+        s = unicodedata.normalize("NFKD", s)
+        # keep only alphabetic characters
+        s = "".join(ch for ch in s if ch.isalpha())
+        return s.lower()
+
+    FUZZY_THRESHOLD = 0.7  # or whatever you're using
+
+    def fuzzy_score(query: str, target: str) -> float:
+        """
+        Returns a similarity score between 0 and 1.
+
+        - If query is 1 letter, only treat exact 1-letter names as matches.
+        - If normalized query is a substring of normalized target (len >= 3), treat as strong match.
+        - Otherwise, use a fuzzy similarity ratio on normalized strings.
+        """
+        if not target:
+            return 0.0
+
+        q = normalize_name(query)
+        t = normalize_name(target)
+
+        if not q:
+            return 0.0
+
+        # one-letter special case
+        if len(q) == 1:
+            return 1.0 if t == q else 0.0
+
+        # substring boost: "bread" in "Bread_from_Seoul", "jose" in "Jose11santamari"
+        if len(q) >= 3 and q in t:
+            return 1.0
+
+        return difflib.SequenceMatcher(None, q, t).ratio()
 
     query = name.strip().lower()
     if not query:
-        await interaction.followup.send("Please provide at least part of an artist name.")
+        await interaction.followup.send(
+            "Please provide at least one letter of an artist name."
+        )
         return
 
     matches_splash: List[CountryRecord] = []
     matches_sprite: List[CountryRecord] = []
 
+    # Track best score per artist name so we can pick the closest one for the title
+    artist_scores: Dict[str, float] = {}
+
     for r in records:
-        splash_name = (r.splash_artist or "").lower()
-        sprite_name = (r.sprite_artist or "").lower()
+        raw_splash = (r.splash_artist or "").strip()
+        raw_sprite = (r.sprite_artist or "").strip()
 
-        if query in splash_name and splash_name:
+        splash_score = fuzzy_score(query, raw_splash) if raw_splash else 0.0
+        sprite_score = fuzzy_score(query, raw_sprite) if raw_sprite else 0.0
+
+        if splash_score >= FUZZY_THRESHOLD:
             matches_splash.append(r)
+            artist_scores[raw_splash] = max(artist_scores.get(raw_splash, 0.0), splash_score)
 
-        if query in sprite_name and sprite_name:
+        if sprite_score >= FUZZY_THRESHOLD:
             matches_sprite.append(r)
+            artist_scores[raw_sprite] = max(artist_scores.get(raw_sprite, 0.0), sprite_score)
 
+    # Apply type filter *after* we've collected matches
     if art_type == "splash":
         matches_sprite = []
     elif art_type == "sprite":
@@ -550,8 +606,14 @@ async def artist(
         )
         return
 
+    # Pick the single best-matching artist name for the title
+    if artist_scores:
+        real_artist = max(artist_scores.items(), key=lambda kv: kv[1])[0]
+    else:
+        real_artist = name  # fallback, shouldn't really happen
+
     embed = discord.Embed(
-        title=f"Art by {name}",
+        title=f"Art by {real_artist}",
         description=(
             f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})\n"
         ),
