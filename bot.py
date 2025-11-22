@@ -566,51 +566,106 @@ async def artist(
 
         return difflib.SequenceMatcher(None, q, t).ratio()
 
-    query = name.strip().lower()
-    if not query:
+    raw_query = name.strip()
+    query_norm = normalize_name(raw_query)
+    if not query_norm:
         await interaction.followup.send(
             "Please provide at least one letter of an artist name."
         )
         return
 
-    matches_splash: List[CountryRecord] = []
-    matches_sprite: List[CountryRecord] = []
-
-    # Track best score per artist name so we can pick the closest one for the title
-    artist_scores: Dict[str, float] = {}
+    # --- FIRST PASS: exact matches only (normalized equality) ---
+    exact_splash: List[CountryRecord] = []
+    exact_sprite: List[CountryRecord] = []
+    exact_artist_names: List[str] = []
 
     for r in records:
         raw_splash = (r.splash_artist or "").strip()
         raw_sprite = (r.sprite_artist or "").strip()
 
-        splash_score = fuzzy_score(query, raw_splash) if raw_splash else 0.0
-        sprite_score = fuzzy_score(query, raw_sprite) if raw_sprite else 0.0
+        nsplash = normalize_name(raw_splash)
+        nsprite = normalize_name(raw_sprite)
 
-        if splash_score >= FUZZY_THRESHOLD:
-            matches_splash.append(r)
-            artist_scores[raw_splash] = max(artist_scores.get(raw_splash, 0.0), splash_score)
+        if nsplash and nsplash == query_norm:
+            exact_splash.append(r)
+            exact_artist_names.append(raw_splash)
 
-        if sprite_score >= FUZZY_THRESHOLD:
-            matches_sprite.append(r)
-            artist_scores[raw_sprite] = max(artist_scores.get(raw_sprite, 0.0), sprite_score)
+        if nsprite and nsprite == query_norm:
+            exact_sprite.append(r)
+            exact_artist_names.append(raw_sprite)
 
-    # Apply type filter *after* we've collected matches
-    if art_type == "splash":
-        matches_sprite = []
-    elif art_type == "sprite":
-        matches_splash = []
+    if exact_splash or exact_sprite:
+        # We found at least one exact artist name match → use ONLY these.
+        matches_splash = exact_splash
+        matches_sprite = exact_sprite
 
-    if not matches_splash and not matches_sprite:
-        await interaction.followup.send(
-            f"I couldn't find any characters for an artist matching `{name}`."
-        )
-        return
+        # pick a display name (just take the first exact artist name)
+        real_artist = exact_artist_names[0]
 
-    # Pick the single best-matching artist name for the title
-    if artist_scores:
-        real_artist = max(artist_scores.items(), key=lambda kv: kv[1])[0]
+        # apply type filter
+        if art_type == "splash":
+            matches_sprite = []
+        elif art_type == "sprite":
+            matches_splash = []
+
+        if not matches_splash and not matches_sprite:
+            await interaction.followup.send(
+                f"I couldn't find any characters for an artist matching `{name}`."
+            )
+            return
+
     else:
-        real_artist = name  # fallback, shouldn't really happen
+            matches_splash: List[CountryRecord] = []
+            matches_sprite: List[CountryRecord] = []
+            artist_scores: Dict[str, float] = {}
+
+            for r in records:
+                raw_splash = (r.splash_artist or "").strip()
+                raw_sprite = (r.sprite_artist or "").strip()
+
+                splash_score = fuzzy_score(query_norm, raw_splash) if raw_splash else 0.0
+                sprite_score = fuzzy_score(query_norm, raw_sprite) if raw_sprite else 0.0
+
+                if splash_score >= FUZZY_THRESHOLD:
+                    matches_splash.append(r)
+                    artist_scores[raw_splash] = max(artist_scores.get(raw_splash, 0.0),
+                                                    splash_score)
+
+                if sprite_score >= FUZZY_THRESHOLD:
+                    matches_sprite.append(r)
+                    artist_scores[raw_sprite] = max(artist_scores.get(raw_sprite, 0.0),
+                                                    sprite_score)
+
+            if art_type == "splash":
+                matches_sprite = []
+            elif art_type == "sprite":
+                matches_splash = []
+
+            if not matches_splash and not matches_sprite:
+                await interaction.followup.send(
+                    f"I couldn't find any characters for an artist matching `{name}`."
+                )
+                return
+
+            if artist_scores:
+                real_artist = max(artist_scores.items(), key=lambda kv: kv[1])[0]
+            else:
+                real_artist = name
+
+            # 🔽 NEW: filter to only that artist
+            target_norm = normalize_name(real_artist)
+
+            def same_artist(a: str) -> bool:
+                return normalize_name(a) == target_norm
+
+            matches_splash = [r for r in matches_splash if same_artist(r.splash_artist)]
+            matches_sprite = [r for r in matches_sprite if same_artist(r.sprite_artist)]
+
+            if not matches_splash and not matches_sprite:
+                await interaction.followup.send(
+                    f"I couldn't find any characters for an artist matching `{real_artist}`."
+                )
+                return
 
     embed = discord.Embed(
         title=f"Art by {real_artist}",
