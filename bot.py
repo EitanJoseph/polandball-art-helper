@@ -64,9 +64,17 @@ import gspread
 from google.oauth2.service_account import Credentials
 from google.auth import default as google_auth_default
 
+import tempfile
+import uuid
+
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
+from PIL import Image
+
 # For local test only
-# from dotenv import load_dotenv
-# load_dotenv()
+from dotenv import load_dotenv
+load_dotenv()
 
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -86,6 +94,8 @@ UNAVAILABLE_VALUES = set(
     for v in os.getenv("UNAVAILABLE_VALUES", "n").split(",")
     if v.strip()
 )
+
+ART_ROOT_FOLDER_ID = "1683upwuV6g3zIamCaY4o1lhtfFDIJHMG"
 CACHE_TTL_SECS = int(os.getenv("CACHE_TTL_SECS", "60"))
 
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
@@ -254,6 +264,134 @@ def normalize_country(text: str) -> str:
     words = [w for w in words if w not in _STOPWORDS]
     return " ".join(words)
 
+def create_drive_service():
+    """
+    Create a Google Drive API client using the same credential logic as SheetClient,
+    but with write access (drive.file).
+    """
+    scopes = ["https://www.googleapis.com/auth/drive.file"]
+
+    if SERVICE_ACCOUNT_JSON:
+        info = json.loads(SERVICE_ACCOUNT_JSON)
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+    elif SERVICE_ACCOUNT_FILE and os.path.exists(SERVICE_ACCOUNT_FILE):
+        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+    else:
+        creds, _ = google_auth_default(scopes=scopes)
+
+    return build("drive", "v3", credentials=creds)
+
+
+def get_or_create_folder(service, name: str, parent_id: Optional[str] = None) -> str:
+    """
+    Find or create a folder in Google Drive or a Shared Drive.
+
+    If parent_id is a folder inside a Shared Drive, everything stays under that.
+    """
+    if parent_id:
+        q = (
+            "mimeType='application/vnd.google-apps.folder' "
+            f"and name='{name}' and '{parent_id}' in parents and trashed=false"
+        )
+    else:
+        q = (
+            "mimeType='application/vnd.google-apps.folder' "
+            f"and name='{name}' and trashed=false"
+        )
+
+    result = service.files().list(
+        q=q,
+        spaces="drive",
+        fields="files(id, name)",
+        pageSize=1,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
+
+    files = result.get("files", [])
+    if files:
+        return files[0]["id"]
+
+    metadata = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+    }
+    if parent_id:
+        metadata["parents"] = [parent_id]
+
+    folder = service.files().create(
+        body=metadata,
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
+    return folder["id"]
+
+def sanitize_for_filename(value: str) -> str:
+    """
+    Make a value safe for use in a filename:
+    - strip outer spaces
+    - normalize unicode
+    - keep only letters/digits and a few safe symbols
+    - replace whitespace with underscores
+    """
+    value = (value or "").strip()
+    if not value:
+        return "unnamed"
+
+    value = unicodedata.normalize("NFKD", value)
+    allowed = "-_.() "
+    value = "".join(ch for ch in value if ch.isalnum() or ch in allowed)
+    value = re.sub(r"\s+", "_", value)
+    return value or "unnamed"
+
+def upload_art_to_drive(
+    service,
+    local_path: str,
+    *,
+    category: str,           # "Sprite" or "Splash"
+    country: str,
+    discord_username: str,
+    artist_name: str,
+):
+    """
+    Upload the local file into:
+        ART_ROOT_FOLDER_ID / [country] / [category] / [file]
+
+    where [file] = discordUser.artistName.country.png
+    """
+    root_parent = ART_ROOT_FOLDER_ID
+
+    # Country folder
+    country_folder_id = get_or_create_folder(service, country, root_parent)
+
+    # Sprite / Splash subfolder under country
+    category_folder_id = get_or_create_folder(service, category, country_folder_id)
+
+    # We enforce PNG only, so just use .png
+    _, ext = os.path.splitext(local_path)
+    ext = ext.lower()
+
+    base_name = f"{discord_username}.{artist_name}.{country}"
+    safe_base = sanitize_for_filename(base_name)
+    drive_filename = f"{safe_base}{ext}"
+
+    metadata = {
+        "name": drive_filename,
+        "parents": [category_folder_id],
+    }
+
+    media = MediaFileUpload(local_path, mimetype="image/png", resumable=True)
+
+    drive_file = service.files().create(
+        body=metadata,
+        media_body=media,
+        fields="id, webViewLink, webContentLink",
+        supportsAllDrives=True,
+    ).execute()
+
+    drive_path = f"{country}/{category}/{drive_filename}"
+    return drive_file, drive_path
+
 
 @dataclass
 class AvailabilityIndex:
@@ -311,6 +449,8 @@ class PolandballBot(commands.Bot):
         self.sheet_client: Optional[SheetClient] = None
         self.cache = Cache(ttl=CACHE_TTL_SECS)
         self._command_lock = False
+        # NEW: Google Drive upload client
+        self.drive_service = create_drive_service()
 
     async def on_ready(self):
         logger.info("Logged in as %s (id=%s)", self.user, self.user.id)
@@ -774,6 +914,283 @@ async def artist(
         format_list("*🎨 Sprite Art*", matches_sprite, lambda r: r.sprite_rdy)
 
     await interaction.followup.send(embed=embed)
+
+CATEGORY_CHOICES = ["Sprite", "Splash"]
+
+
+def convert_png_to_webp(png_path: str) -> str:
+    """
+    Converts a PNG file to WEBP and returns the new WEBP path.
+    Keeps transparency intact.
+    """
+    webp_path = os.path.splitext(png_path)[0] + ".webp"
+
+    with Image.open(png_path) as img:
+        img.save(
+            webp_path,
+            format="WEBP",
+            lossless=True,   # preserve crisp pixel edges
+            quality=100,
+        )
+
+    return webp_path
+
+def get_custom_emoji(bot: commands.Bot, emoji_name: str) -> str:
+    """
+    Returns the Discord representation of a custom emoji by name.
+    Falls back to text if not found.
+    """
+    emoji = discord.utils.get(bot.emojis, name=emoji_name)
+    return str(emoji) if emoji else f":{emoji_name}:"
+
+
+@bot.tree.command(name="submit", description="Submit art")
+@app_commands.describe(
+    category="Art category (Sprite or Splash)",
+    artist_name="Folder artist name (as you want it to appear)",
+    country="Country / character name (from the game list)",
+    image="Attach your art file (PNG only)",
+)
+@app_commands.choices(
+    category=[app_commands.Choice(name=c, value=c) for c in CATEGORY_CHOICES]
+)
+async def submit_art(
+    interaction: discord.Interaction,
+    category: app_commands.Choice[str],
+    artist_name: str,
+    country: str,
+    image: discord.Attachment,
+):
+    await interaction.response.defer(ephemeral=True)
+
+    tmp_path: Optional[str] = None
+
+    try:
+        # --- 1) Enforce country must be from spreadsheet ---
+        try:
+            idx = bot._load_index()  # AvailabilityIndex built from your sheet
+            valid_countries = set(idx.all_names)
+        except Exception as e:
+            logger.exception("Failed to load index for submit_art: %s", e)
+            await interaction.followup.send(
+                "❌ I couldn't load the country list from the sheet. Please try again later.",
+                ephemeral=True,
+            )
+            return
+
+        if country not in valid_countries:
+            await interaction.followup.send(
+                f"❌ `{country}` is not a valid country in the game list.\n"
+                "Please choose a country from the autocomplete suggestions.",
+                ephemeral=True,
+            )
+            return
+
+        # --- 2) Enforce PNG only ---
+        filename = image.filename or ""
+        _, ext = os.path.splitext(filename)
+        ext = ext.lower()
+
+        # Optionally also check content_type: image.content_type == "image/png"
+        if ext != ".png":
+            await interaction.followup.send(
+                "❌ Only **PNG** files are allowed.\n"
+                f"You uploaded `{filename}`.\n"
+                "Please export your art as a `.png` file and try again.",
+                ephemeral=True,
+            )
+            return
+
+        # 3) Use system temp directory (cross-platform)
+        tmp_dir = tempfile.gettempdir()
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4()}{ext}")
+
+        # Save Discord attachment to temp file
+        await image.save(tmp_path)
+
+        # 4) Upload to Drive: Country / [Sprite|Splash] / discordUser.artist.country.png
+        service = interaction.client.drive_service
+        discord_username = interaction.user.name  # or .display_name if you want
+
+        # Convert PNG → WEBP
+        webp_path = convert_png_to_webp(tmp_path)
+
+        # Upload PNG
+        drive_file_png, drive_path_png = upload_art_to_drive(
+            service=service,
+            local_path=tmp_path,
+            category=category.value,
+            country=country,
+            discord_username=discord_username,
+            artist_name=artist_name,
+        )
+
+        # Upload WEBP
+        drive_file_webp, drive_path_webp = upload_art_to_drive(
+            service=service,
+            local_path=webp_path,
+            category=category.value,
+            country=country,
+            discord_username=discord_username,
+            artist_name=artist_name,
+        )
+
+        view_link_png = drive_file_png.get("webViewLink", "")
+        view_link_webp = drive_file_webp.get("webViewLink", "")
+
+        fire_emoji = get_custom_emoji(bot, "PoleonFire")
+        await interaction.followup.send(
+            "✅ **Submission received!**\n\n"
+            "Your art has been successfully submitted.\n"
+            "You'll be contacted if any changes are needed. Thank you for helping bring Polandball Go to life! {fire_emoji}",
+            # f"**PNG:** {drive_path_png}\n{view_link_png}\n\n"
+            # f"**WEBP:** {drive_path_webp}\n{view_link_webp}",
+            ephemeral=True,
+        )
+
+    except Exception as e:
+        logger.exception("submit_art failed")
+        await interaction.followup.send(
+            f"❌ Something went wrong while uploading your art:\n`{e}`",
+            ephemeral=True,
+        )
+
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+SPRITE_EXAMPLE_URL = "sprite link"
+SPLASH_EXAMPLE_URL = "splash link"
+
+
+@submit_art.autocomplete("country")
+async def submit_art_country_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+):
+    """
+    Autocomplete callback for the 'country' option.
+    Suggests country names from column B of the sheet.
+    """
+    try:
+        idx = bot._load_index()  # AvailabilityIndex
+        all_countries = idx.all_names  # already sorted list of names
+    except Exception as e:
+        logger.exception("Failed to load index for autocomplete: %s", e)
+        return []
+
+    current_lower = (current or "").lower()
+    if not current_lower:
+        # first open: show first 25 countries
+        matches = all_countries[:25]
+    else:
+        matches = [
+            name for name in all_countries
+            if current_lower in name.lower()
+        ][:25]
+
+    return [app_commands.Choice(name=m, value=m) for m in matches]
+
+@bot.tree.command(
+    name="help",
+    description="Show all bot commands and Polandball art guidelines",
+)
+async def help_command(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    # --- Commands section ---
+    commands_text = (
+        "**/submit** – Submit art to the Polandball Go Drive\n"
+        "• `category` – **Sprite** or **Splash**\n"
+        "• `artist_name` – How you want to be credited in folders\n"
+        "• `country` – Pick from the autocomplete list (only countries from the game sheet)\n"
+        "• `image` – **PNG only**\n\n"
+        "**/available** `[character]`\n"
+        "• No name → lists all characters that are available as sprites / splashes\n"
+        "• With a name → shows if that character’s sprite/splash is available or claimed\n\n"
+        "**/artist** `name` `[kind]`\n"
+        "• Shows which characters a given artist has done (sprite / splash / both)\n\n"
+        "**/ping**\n"
+        "• Quick check that the bot is alive (replies with `pong`)."
+    )
+
+    # --- Sprite vs Splash section ---
+    art_types_text = (
+        "**Splash Art**\n"
+        "• Detailed, stylized illustration (often with a background)\n"
+        "• Used in character / showcase screens\n"
+        "• Wide banners (around 3:2) look best\n"
+        "• Main focus must be the **main countryball** – side characters are okay "
+        "as long as they don't steal the spotlight\n\n"
+        "**Sprite Art**\n"
+        "• Simple, clean countryball with **no background**\n"
+        "• Used as the in-game character model\n"
+        "• Less detail – they’ll be small on screen, too much detail won’t be visible\n"
+        "• A subtle shadow under the ball helps it feel grounded in-game\n"
+        "• Think of sprites as the **playable** versions of the balls."
+    )
+
+    # --- Core Polandball drawing rules (short version) ---
+    polandball_rules_text = (
+        "**Basic style**\n"
+        "• Draw the ball **by hand with the mouse** – no circle tools, shape tools or "
+        "vector-perfect outlines.\n"
+        "• **No anti-aliasing** – outlines must be **hard-edged and pixel-clean** (no soft or blurry edges).\n"
+        "• Simple colours, no fancy gradients or 3D rendering.\n"
+        "• Eyes only (no mouths or noses in normal cases) – two white circles with black pupils.\n\n"
+        "**Flags & shapes**\n"
+        "• Use the **correct flag colours and layout** for each country.\n"
+        "• Polandball is traditionally drawn **upside down** (white on top, red on bottom, "
+        "but the ball is flipped).\n"
+        "• Balls stay round – no country-shaped blobs or detailed maps."
+    )
+
+    embed = discord.Embed(
+        title="Polandball Go Art Helper – Help",
+        description=(
+            "Here’s how to use the bot and the basics of Polandball art style.\n"
+            "You can submit either **Sprite Art**, **Splash Art**, or both."
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(name="Commands", value=commands_text, inline=False)
+    embed.add_field(name="Sprite vs Splash", value=art_types_text, inline=False)
+    embed.add_field(
+        name="Polandball Art Rules (Short Version)",
+        value=polandball_rules_text,
+        inline=False,
+    )
+    embed.set_footer(
+        text="Based on the r/Polandball “Académie Polandballaise” tutorial and community rules."
+    )
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # --- Sprite Example ---
+    sprite_embed = discord.Embed(
+        title="✅ Sprite Art — Good Example",
+        color=discord.Color.green(),
+    )
+    sprite_embed.set_image(url=SPRITE_EXAMPLE_URL)
+
+    await interaction.followup.send(embed=sprite_embed)
+
+
+    # --- Splash Example ---
+    splash_embed = discord.Embed(
+        title="✅ Splash Art — Good Example",
+        color=discord.Color.orange(),
+    )
+    splash_embed.set_image(url=SPLASH_EXAMPLE_URL)
+
+    await interaction.followup.send(embed=splash_embed)
+
+
 
 async def handle_client(reader, writer):
     try:
