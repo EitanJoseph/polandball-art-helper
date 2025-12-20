@@ -51,6 +51,7 @@ import os
 import re
 import time
 import unicodedata
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
@@ -95,7 +96,7 @@ UNAVAILABLE_VALUES = set(
     if v.strip()
 )
 
-ART_ROOT_FOLDER_ID = "1683upwuV6g3zIamCaY4o1lhtfFDIJHMG"
+ART_ROOT_FOLDER_ID = "1UrkcyLNZzt5YG20zo0vEAiFU1xXSEeu2"
 CACHE_TTL_SECS = int(os.getenv("CACHE_TTL_SECS", "60"))
 
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
@@ -113,6 +114,8 @@ class CountryRecord:
     splash_rdy: str
     sprite_artist: str
     sprite_rdy: str
+    splash_artist_alt: str
+    sprite_artist_alt: str
 
     def _parse(self, raw: str) -> Optional[bool]:
         if not raw:
@@ -188,6 +191,8 @@ class SheetClient:
         splash_rdy_i = col_letter_to_index("D")
         sprite_artist_i = col_letter_to_index("E")
         sprite_rdy_i = col_letter_to_index("F")
+        splash_artist_alt_i = col_letter_to_index("G")
+        sprite_artist_alt_i = col_letter_to_index("H")
 
         records: List[CountryRecord] = []
 
@@ -223,6 +228,16 @@ class SheetClient:
                 if sprite_rdy_i is not None and sprite_rdy_i < len(row)
                 else ""
             )
+            splash_artist_alt = (
+            row[splash_artist_alt_i].strip()
+            if splash_artist_alt_i is not None and splash_artist_alt_i < len(row)
+            else ""
+            )
+            sprite_artist_alt = (
+                row[sprite_artist_alt_i].strip()
+                if sprite_artist_alt_i is not None and sprite_artist_alt_i < len(row)
+                else ""
+            )
 
             if country:
                 records.append(
@@ -233,6 +248,8 @@ class SheetClient:
                         splash_rdy=splash_rdy,
                         sprite_artist=sprite_artist,
                         sprite_rdy=sprite_rdy,
+                        splash_artist_alt=splash_artist_alt,
+                        sprite_artist_alt=sprite_artist_alt,
                     )
                 )
         return records
@@ -479,6 +496,220 @@ class PolandballBot(commands.Bot):
 
 bot = PolandballBot()
 
+PAGE_SIZE = 20
+
+def chunk_list(items: List[str], page: int, page_size: int = PAGE_SIZE) -> List[str]:
+    start = page * page_size
+    end = start + page_size
+    return items[start:end]
+
+def build_available_embed(
+    *,
+    kind: str,                  # "sprite" or "splash"
+    page: int,
+    sprite_list: List[str],
+    splash_list: List[str],
+) -> discord.Embed:
+    if kind == "sprite":
+        items = sprite_list
+        title = "Available Sprites"
+        icon = "🎨"
+    else:
+        items = splash_list
+        title = "Available Splashes"
+        icon = "🖼️"
+
+    total = len(items)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+
+    page_items = chunk_list(items, page, PAGE_SIZE)
+    body = "\n".join(f"• {x}" for x in page_items) if page_items else "_none_"
+
+    embed = discord.Embed(
+        title=f"{icon} {title}",
+        description=(
+            f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})\n"
+            f"Updated every {CACHE_TTL_SECS}s\n\n"
+            f"**Page {page + 1}/{total_pages}** • **{total} total**"
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(name="Characters", value=body, inline=False)
+    embed.set_thumbnail(url="https://raw.githubusercontent.com/EitanJoseph/polandball-art-helper/refs/heads/main/profile%20picx.png")
+    return embed
+
+
+class AvailableKindSelect(discord.ui.Select):
+    def __init__(self, parent_view: "AvailableListView"):
+        self.parent_view = parent_view
+        options = [
+            discord.SelectOption(label="Sprites", value="sprite", emoji="🎨"),
+            discord.SelectOption(label="Splashes", value="splash", emoji="🖼️"),
+        ]
+        super().__init__(
+            placeholder="Choose Sprite or Splash…",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.parent_view.kind = self.values[0]
+        self.parent_view.page = 0  # reset to first page when switching kind
+        embed = build_available_embed(
+            kind=self.parent_view.kind,
+            page=self.parent_view.page,
+            sprite_list=self.parent_view.sprite_list,
+            splash_list=self.parent_view.splash_list,
+        )
+        self.parent_view._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
+class AvailableListView(discord.ui.View):
+    def __init__(self, *, sprite_list: List[str], splash_list: List[str], kind: str = "sprite"):
+        super().__init__(timeout=180)
+        self.sprite_list = sprite_list
+        self.splash_list = splash_list
+        self.kind = kind
+        self.page = 0
+
+        self.add_item(AvailableKindSelect(self))
+        self._sync_buttons()
+
+    def _current_items(self) -> List[str]:
+        return self.sprite_list if self.kind == "sprite" else self.splash_list
+
+    def _total_pages(self) -> int:
+        total = len(self._current_items())
+        return max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    def _sync_buttons(self):
+        total_pages = self._total_pages()
+        # disable prev on first page; disable next on last page
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and child.custom_id == "avail_prev":
+                child.disabled = (self.page <= 0)
+            if isinstance(child, discord.ui.Button) and child.custom_id == "avail_next":
+                child.disabled = (self.page >= total_pages - 1)
+
+    @discord.ui.button(label="Prev", style=discord.ButtonStyle.secondary, custom_id="avail_prev")
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = max(0, self.page - 1)
+        embed = build_available_embed(
+            kind=self.kind,
+            page=self.page,
+            sprite_list=self.sprite_list,
+            splash_list=self.splash_list,
+        )
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, custom_id="avail_next")
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = min(self._total_pages() - 1, self.page + 1)
+        embed = build_available_embed(
+            kind=self.kind,
+            page=self.page,
+            sprite_list=self.sprite_list,
+            splash_list=self.splash_list,
+        )
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        # Disable controls after timeout so users don’t click dead buttons
+        for item in self.children:
+            item.disabled = True
+        # Can't edit without message reference here; Discord will just show disabled UI on next edit
+        # (Optional) If you want to edit on timeout, store message in the command after sending.
+        return
+
+class SuggestionView(discord.ui.View):
+    def __init__(self, *, user_id: int, suggestion: str, idx: "AvailabilityIndex"):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.suggestion = suggestion
+        self.idx = idx
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This prompt isn’t for you — run `/available` yourself 🙂",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Yes — show it", style=discord.ButtonStyle.primary)
+    async def yes_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        rec, _ = self.idx.find(self.suggestion)
+        if not rec:
+            await interaction.response.edit_message(
+                content="Sorry — I couldn’t load that character anymore.",
+                view=None,
+            )
+            return
+
+        embed = build_character_embed(rec)
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=None,
+        )
+
+    @discord.ui.button(label="No", style=discord.ButtonStyle.secondary)
+    async def no_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="Okay — try `/available <character>` again with a different name.",
+            view=None,
+        )
+
+def build_character_embed(rec: "CountryRecord") -> discord.Embed:
+    ig = rec.in_game_status()
+    if ig is True:
+        ig_text = "🟢 In Game"
+        color = discord.Color.green()
+    elif ig is False:
+        ig_text = "🔴 Not In Game"
+        color = discord.Color.light_grey()
+    else:
+        ig_text = "⚪ In-game status unknown"
+        color = discord.Color.light_grey()
+
+    def fmt_name(s: str) -> str:
+        s = (s or "").strip()
+        return f"`{s}`" if s else "`—`"
+
+    sprite_lines = [
+        f"🖌️ **Current Artist:** {fmt_name(rec.sprite_artist)}",
+        f"**Status:** `{format_ready_flag(rec.sprite_rdy)}`",
+        "",
+        f"🧩 **Alternative Artist(s):** {fmt_name(rec.sprite_artist_alt)}",
+        "**Alt submissions:** ✅ Open",
+    ]
+
+    splash_lines = [
+        f"🖌️ **Current Artist:** {fmt_name(rec.splash_artist)}",
+        f"**Status:** `{format_ready_flag(rec.splash_rdy)}`",
+        "",
+        f"🧩 **Alternative Artist(s):** {fmt_name(rec.splash_artist_alt)}",
+        "**Alt submissions:** ✅ Open",
+    ]
+
+    embed = discord.Embed(
+        title=rec.country,
+        description=ig_text,
+        url=GOOGLE_SHEET_URL,
+        color=color,
+    )
+    embed.set_thumbnail(url="https://polandballgo.com/assets/logo.png")
+    embed.add_field(name="Sprite", value="\n".join(sprite_lines), inline=True)
+    embed.add_field(name="Splash", value="\n".join(splash_lines), inline=True)
+    embed.set_footer(text=f"Sourced from {SHEET_NAME}")
+    return embed
+
 
 @bot.tree.command(name="available", description="Check availability of characters or view all available characters")
 @app_commands.describe(character="Character name (leave blank to see all available)")
@@ -503,101 +734,55 @@ async def available(interaction: discord.Interaction, character: Optional[str] =
             key=str.lower,
         )
 
-        # Helper to split long lists into multiple embed fields (Discord field limit ~1024 chars)
-        def fields_from_list(title: str, values: List[str]) -> List[Tuple[str, str, bool]]:
-            if not values:
-                return [(f"{title} (0)", "_none_", False)]
-
-            max_len = 900
-            chunks: List[List[str]] = [[]]
-            for v in sorted(values, key=str.lower):
-                current = chunks[-1]
-                candidate = "\n".join(current + [f"• {v}"])
-                if len(candidate) > max_len:
-                    chunks.append([f"• {v}"])
-                else:
-                    current.append(f"• {v}")
-
-            fields: List[Tuple[str, str, bool]] = []
-            for i, chunk in enumerate(chunks, start=1):
-                name_suffix = f" (page {i})" if len(chunks) > 1 else ""
-                fields.append((f"{title} ({len(values)}){name_suffix}", "\n".join(chunk), False))
-            return fields
-
-        embed = discord.Embed(
-            title="Available Characters",
-            description=f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})\nUpdated every {CACHE_TTL_SECS}s",
-            color=discord.Color.blurple(),
+        view = AvailableListView(sprite_list=sprite_list, splash_list=splash_list, kind="sprite")
+        embed = build_available_embed(
+            kind="sprite",
+            page=0,
+            sprite_list=sprite_list,
+            splash_list=splash_list,
         )
-        embed.set_thumbnail(url="https://raw.githubusercontent.com/EitanJoseph/polandball-art-helper/refs/heads/main/profile%20picx.png")
 
-        for title, content, inline in fields_from_list("Sprites", sprite_list):
-            embed.add_field(name=title, value=content, inline=False)
-        for title, content, inline in fields_from_list("Splashes", splash_list):
-            embed.add_field(name=title, value=content, inline=False)
-
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, view=view)
         return
 
-    rec, suggestion = idx.find(arg_str)
+
+    rec = None
+    suggestion = None
+
+    try:
+        rec, suggestion = idx.find(arg_str)
+    except Exception as e:
+        logger.exception("available: idx.find failed for query=%r", arg_str)
+        await interaction.followup.send(
+            "Sorry — something went wrong while searching that character name.",
+            ephemeral=True,
+        )
+        return
+    
     if rec:
-        s_sprite = rec.is_available("sprite")
-        s_splash = rec.is_available("splash")
-
-        if s_sprite is True:
-            sprite_status = "✅ **Available**"
-        elif s_sprite is False:
-            sprite_status = "☑️ **Claimed**"
-        else:
-            sprite_status = "⚪ **Unknown**"
-
-        if s_splash is True:
-            splash_status = "✅ **Available**"
-        elif s_splash is False:
-            splash_status = "☑️ **Claimed**"
-        else:
-            splash_status = "⚪ **Unknown**"
-
-        ig = rec.in_game_status()
-        if ig is True:
-            ig_text = "🟢 In Game"
-        elif ig is False:
-            ig_text = "🔴 Not In Game"
-        else:
-            ig_text = "⚪ In-game status unknown"
-
-        sprite_lines = [sprite_status]
-        if rec.sprite_artist:
-            sprite_lines.append(f"Artist: `{rec.sprite_artist}`")
-        if rec.sprite_rdy:
-            sprite_lines.append(f"Status: `{format_ready_flag(rec.sprite_rdy)}`")
-
-        splash_lines = [splash_status]
-        if rec.splash_artist:
-            splash_lines.append(f"Artist: `{rec.splash_artist}`")
-        if rec.splash_rdy:
-            splash_lines.append(f"Status: `{format_ready_flag(rec.splash_rdy)}`")
-
-        embed = discord.Embed(
-            title=rec.country,
-            description=ig_text,
-            url=GOOGLE_SHEET_URL,
-            color=discord.Color.light_grey() if ig is True else discord.Color.green(),
-        )
-        embed.set_thumbnail(url="https://polandballgo.com/assets/logo.png")
-
-        embed.add_field(name="Sprite", value="\n".join(sprite_lines), inline=True)
-        embed.add_field(name="Splash", value="\n".join(splash_lines), inline=True)
-
-        embed.set_footer(text=f"Sourced from {SHEET_NAME}")
+        embed = build_character_embed(rec)
         await interaction.followup.send(embed=embed)
         return
-
+    # ✅ No exact match:
     if suggestion:
-        await interaction.followup.send(f"I couldn't find that exactly.\nDid you mean **{suggestion}**?")
-    else:
-        await interaction.followup.send("I couldn't find that country in the sheet.")
+        view = SuggestionView(
+            user_id=interaction.user.id,
+            suggestion=suggestion,
+            idx=idx,
+    )
+        await interaction.followup.send(
+            content=f"I couldn't find that exactly.\nDid you mean **{suggestion}**?",
+            view=view,
+            ephemeral=True,
+        )
+        return
 
+
+    await interaction.followup.send(
+        "I couldn't find that country in the sheet.",
+        ephemeral=True,
+    )
+    return
 
 def format_ready_flag(raw: str) -> str:
     s = (raw or "").strip().lower()
@@ -1107,9 +1292,9 @@ async def help_command(interaction: discord.Interaction):
 
     # --- Commands section ---
     commands_text = (
-        "**/submit** – Submit art to the Polandball Go Drive\n"
+        "**/submit** – Submit art to Polandball Go\n"
         "• `category` – **Sprite** or **Splash**\n"
-        "• `artist_name` – How you want to be credited in folders\n"
+        "• `artist_name` – How you want to be credited in game\n"
         "• `country` – Pick from the autocomplete list (only countries from the game sheet)\n"
         "• `image` – **PNG only**\n\n"
         "**/available** `[character]`\n"
@@ -1173,24 +1358,24 @@ async def help_command(interaction: discord.Interaction):
 
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-    # --- Sprite Example ---
+    # --- Sprite Example (image + short description in same box) ---
     sprite_embed = discord.Embed(
         title="✅ Sprite Art — Good Example",
+        description="Sprite art = the in-game character model (simple, clean, no background).",
         color=discord.Color.green(),
     )
     sprite_embed.set_image(url=SPRITE_EXAMPLE_URL)
+    await interaction.followup.send(embed=sprite_embed, ephemeral=True)
 
-    await interaction.followup.send(embed=sprite_embed)
-
-
-    # --- Splash Example ---
+    # --- Splash Example (image + short description in same box) ---
     splash_embed = discord.Embed(
         title="✅ Splash Art — Good Example",
+        description="Splash art = detailed, stylized illustration for character screens.",
         color=discord.Color.orange(),
     )
     splash_embed.set_image(url=SPLASH_EXAMPLE_URL)
+    await interaction.followup.send(embed=splash_embed, ephemeral=True)
 
-    await interaction.followup.send(embed=splash_embed)
 
 
 
