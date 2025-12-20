@@ -1064,8 +1064,10 @@ async def submit_art(
             except OSError:
                 pass
 
-SPRITE_EXAMPLE_URL = "sprite link"
-SPLASH_EXAMPLE_URL = "splash link"
+SPRITE_EXAMPLE_URL = "https://raw.githubusercontent.com/wwxiao09/polandball-art-helper/669d6100bce364b77d74b90885830fa85b6b0231/denmark.png"
+
+SPLASH_EXAMPLE_URL = "https://raw.githubusercontent.com/wwxiao09/polandball-art-helper/669d6100bce364b77d74b90885830fa85b6b0231/Baekje.png"
+
 
 
 @submit_art.autocomplete("country")
