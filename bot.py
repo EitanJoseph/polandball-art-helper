@@ -16,6 +16,12 @@ Commands (slash commands: /)
 4) /artist name: "Artist Name" (optional: kind = splash / sprite / both)
    → Shows all characters whose sprite or splash art was created by the specified artist.
 
+5) /submit
+   → Submit Sprite or Splash art for a character (PNG only).
+
+6) /help
+   → View all bot commands and Polandball art guidelines.
+
 
 Quick Start
 -----------
@@ -505,40 +511,66 @@ def chunk_list(items: List[str], page: int, page_size: int = PAGE_SIZE) -> List[
 
 def build_available_embed(
     *,
-    kind: str,                  # "sprite" or "splash"
+    kind: str,
     page: int,
-    sprite_list: List[str],
-    splash_list: List[str],
+    sprite_needs_primary: List[str],
+    sprite_has_primary: List[str],
+    splash_needs_primary: List[str],
+    splash_has_primary: List[str],
 ) -> discord.Embed:
-    if kind == "sprite":
-        items = sprite_list
-        title = "Available Sprites"
-        icon = "🎨"
-    else:
-        items = splash_list
-        title = "Available Splashes"
-        icon = "🖼️"
+    PER_PAGE = 20
 
-    total = len(items)
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    if kind == "sprite":
+        needs = sprite_needs_primary
+        has = sprite_has_primary
+        title = "🎨 Sprite List"
+        thumb = "https://polandballgo.com/assets/logo.png"
+    else:
+        needs = splash_needs_primary
+        has = splash_has_primary
+        title = "🖼️ Splash List"
+        thumb = "https://polandballgo.com/assets/logo.png"
+
+    combined = needs + has
+    total = len(combined)
+    total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
     page = max(0, min(page, total_pages - 1))
 
-    page_items = chunk_list(items, page, PAGE_SIZE)
-    body = "\n".join(f"• {x}" for x in page_items) if page_items else "_none_"
+    start = page * PER_PAGE
+    end = start + PER_PAGE
+    chunk = combined[start:end]
+
+    # split this page chunk back into sections
+    needs_set = set(needs)
+    chunk_needs = [c for c in chunk if c in needs_set]
+    chunk_has = [c for c in chunk if c not in needs_set]
 
     embed = discord.Embed(
-        title=f"{icon} {title}",
-        description=(
-            f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})\n"
-            f"Updated every {CACHE_TTL_SECS}s\n\n"
-            f"**Page {page + 1}/{total_pages}** • **{total} total**"
-        ),
+        title=title,
+        description=f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})\nUpdated every {CACHE_TTL_SECS}s",
         color=discord.Color.blurple(),
     )
-    embed.add_field(name="Characters", value=body, inline=False)
-    embed.set_thumbnail(url="https://raw.githubusercontent.com/EitanJoseph/polandball-art-helper/refs/heads/main/profile%20picx.png")
-    return embed
+    embed.set_thumbnail(url=thumb)
+    embed.add_field(name=f"Page {page+1}/{total_pages} • {total} total", value="\u200b", inline=False)
 
+    if chunk_needs:
+        embed.add_field(
+            name="✅ Currently no primary artist (needs main art)",
+            value="\n".join(f"• {c}" for c in chunk_needs),
+            inline=False,
+        )
+
+    if chunk_has:
+        embed.add_field(
+            name="✨ Has primary artist (alt submissions welcome)",
+            value="\n".join(f"• {c}" for c in chunk_has),
+            inline=False,
+        )
+
+    if not chunk_needs and not chunk_has:
+        embed.add_field(name="Characters", value="_none_", inline=False)
+
+    return embed
 
 class AvailableKindSelect(discord.ui.Select):
     def __init__(self, parent_view: "AvailableListView"):
@@ -556,43 +588,144 @@ class AvailableKindSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         self.parent_view.kind = self.values[0]
-        self.parent_view.page = 0  # reset to first page when switching kind
+        self.parent_view.page = 0  # reset when switching kind
+
         embed = build_available_embed(
             kind=self.parent_view.kind,
             page=self.parent_view.page,
-            sprite_list=self.parent_view.sprite_list,
-            splash_list=self.parent_view.splash_list,
+            sprite_needs_primary=self.parent_view.sprite_needs_primary,
+            sprite_has_primary=self.parent_view.sprite_has_primary,
+            splash_needs_primary=self.parent_view.splash_needs_primary,
+            splash_has_primary=self.parent_view.splash_has_primary,
         )
+
         self.parent_view._sync_buttons()
         await interaction.response.edit_message(embed=embed, view=self.parent_view)
 
 
+class PageJumpModal(discord.ui.Modal, title="Jump to page"):
+    page = discord.ui.TextInput(
+        label="Page number",
+        placeholder="Enter an integer (e.g. 1)",
+        required=True,
+        max_length=5,
+    )
+
+    def __init__(self, parent_view: "AvailableListView"):
+        super().__init__()
+        self.parent_view = parent_view
+
+        # Optional: make the placeholder show the real range
+        total = self.parent_view._total_pages()
+        self.page.placeholder = f"1 - {total} (integer only)"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        total_pages = self.parent_view._total_pages()
+        raw = (self.page.value or "").strip()
+
+        # allow only digits, no decimals, no minus, no spaces
+        if not re.fullmatch(r"\d+", raw):
+            await interaction.response.send_message(
+                f"Please enter a whole number between **1** and **{total_pages}**.",
+                ephemeral=True,
+            )
+            return
+
+        n = int(raw)  # safe because digits only
+        if not (1 <= n <= total_pages):
+            await interaction.response.send_message(
+                f"Page must be between **1** and **{total_pages}**.",
+                ephemeral=True,
+            )
+            return
+
+        self.parent_view.page = n - 1
+
+        embed = build_available_embed(
+            kind=self.parent_view.kind,
+            page=self.parent_view.page,
+            sprite_needs_primary=self.parent_view.sprite_needs_primary,
+            sprite_has_primary=self.parent_view.sprite_has_primary,
+            splash_needs_primary=self.parent_view.splash_needs_primary,
+            splash_has_primary=self.parent_view.splash_has_primary,
+        )
+        self.parent_view._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
 class AvailableListView(discord.ui.View):
-    def __init__(self, *, sprite_list: List[str], splash_list: List[str], kind: str = "sprite"):
-        super().__init__(timeout=180)
-        self.sprite_list = sprite_list
-        self.splash_list = splash_list
+    def __init__(
+        self,
+        *,
+        user_id: int,
+        sprite_needs_primary: List[str],
+        sprite_has_primary: List[str],
+        splash_needs_primary: List[str],
+        splash_has_primary: List[str],
+        kind: str = "sprite",
+    ):
+        super().__init__(timeout=600)
+        self.user_id = user_id
+        self.message: discord.Message | None = None
+
+        self.sprite_needs_primary = sprite_needs_primary
+        self.sprite_has_primary = sprite_has_primary
+        self.splash_needs_primary = splash_needs_primary
+        self.splash_has_primary = splash_has_primary
+
         self.kind = kind
         self.page = 0
 
         self.add_item(AvailableKindSelect(self))
         self._sync_buttons()
 
-    def _current_items(self) -> List[str]:
-        return self.sprite_list if self.kind == "sprite" else self.splash_list
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This page control isn’t for you — run `/available` to get your own.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    def _current_combined(self) -> List[str]:
+        """Needs primary first, then has primary."""
+        if self.kind == "sprite":
+            return self.sprite_needs_primary + self.sprite_has_primary
+        return self.splash_needs_primary + self.splash_has_primary
 
     def _total_pages(self) -> int:
-        total = len(self._current_items())
+        total = len(self._current_combined())
         return max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
 
     def _sync_buttons(self):
         total_pages = self._total_pages()
-        # disable prev on first page; disable next on last page
+        on_first = (self.page <= 0)
+        on_last = (self.page >= total_pages - 1)
+
         for child in self.children:
-            if isinstance(child, discord.ui.Button) and child.custom_id == "avail_prev":
-                child.disabled = (self.page <= 0)
-            if isinstance(child, discord.ui.Button) and child.custom_id == "avail_next":
-                child.disabled = (self.page >= total_pages - 1)
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id == "avail_prev":
+                    child.disabled = on_first
+                elif child.custom_id == "avail_next":
+                    child.disabled = on_last
+                elif child.custom_id == "avail_first":
+                    child.disabled = on_first
+                elif child.custom_id == "avail_last":
+                    child.disabled = on_last
+
+    @discord.ui.button(label="First", style=discord.ButtonStyle.secondary, custom_id="avail_first")
+    async def first_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = 0
+        embed = build_available_embed(
+            kind=self.kind,
+            page=self.page,
+            sprite_needs_primary=self.sprite_needs_primary,
+            sprite_has_primary=self.sprite_has_primary,
+            splash_needs_primary=self.splash_needs_primary,
+            splash_has_primary=self.splash_has_primary,
+        )
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Prev", style=discord.ButtonStyle.secondary, custom_id="avail_prev")
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -600,8 +733,10 @@ class AvailableListView(discord.ui.View):
         embed = build_available_embed(
             kind=self.kind,
             page=self.page,
-            sprite_list=self.sprite_list,
-            splash_list=self.splash_list,
+            sprite_needs_primary=self.sprite_needs_primary,
+            sprite_has_primary=self.sprite_has_primary,
+            splash_needs_primary=self.splash_needs_primary,
+            splash_has_primary=self.splash_has_primary,
         )
         self._sync_buttons()
         await interaction.response.edit_message(embed=embed, view=self)
@@ -612,19 +747,40 @@ class AvailableListView(discord.ui.View):
         embed = build_available_embed(
             kind=self.kind,
             page=self.page,
-            sprite_list=self.sprite_list,
-            splash_list=self.splash_list,
+            sprite_needs_primary=self.sprite_needs_primary,
+            sprite_has_primary=self.sprite_has_primary,
+            splash_needs_primary=self.splash_needs_primary,
+            splash_has_primary=self.splash_has_primary,
         )
         self._sync_buttons()
         await interaction.response.edit_message(embed=embed, view=self)
 
+    @discord.ui.button(label="Last", style=discord.ButtonStyle.secondary, custom_id="avail_last")
+    async def last_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = self._total_pages() - 1
+        embed = build_available_embed(
+            kind=self.kind,
+            page=self.page,
+            sprite_needs_primary=self.sprite_needs_primary,
+            sprite_has_primary=self.sprite_has_primary,
+            splash_needs_primary=self.splash_needs_primary,
+            splash_has_primary=self.splash_has_primary,
+        )
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Jump", style=discord.ButtonStyle.primary, custom_id="avail_jump")
+    async def jump_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PageJumpModal(self))
+
     async def on_timeout(self):
-        # Disable controls after timeout so users don’t click dead buttons
         for item in self.children:
             item.disabled = True
-        # Can't edit without message reference here; Discord will just show disabled UI on next edit
-        # (Optional) If you want to edit on timeout, store message in the command after sending.
-        return
+        if self.message:
+            try:
+                await self.message.edit(content="(Expired — run `/available` again.)", view=self)
+            except Exception:
+                pass
 
 class SuggestionView(discord.ui.View):
     def __init__(self, *, user_id: int, suggestion: str, idx: "AvailabilityIndex"):
@@ -725,24 +881,46 @@ async def available(interaction: discord.Interaction, character: Optional[str] =
     arg_str = (character or "").strip()
 
     if arg_str.lower() in {"ball", "balls", ""}:
-        sprite_list = sorted(
-            {r.country for r in idx.by_norm.values() if r.is_available("sprite") is True},
+        # --- Needs Primary (no primary artist) ---
+        sprite_needs_primary = sorted(
+            {r.country for r in idx.by_norm.values() if not (r.sprite_artist or "").strip()},
             key=str.lower,
         )
-        splash_list = sorted(
-            {r.country for r in idx.by_norm.values() if r.is_available("splash") is True},
+        splash_needs_primary = sorted(
+            {r.country for r in idx.by_norm.values() if not (r.splash_artist or "").strip()},
             key=str.lower,
         )
 
-        view = AvailableListView(sprite_list=sprite_list, splash_list=splash_list, kind="sprite")
+        # --- Has Primary (still open to alt submissions) ---
+        sprite_has_primary = sorted(
+            {r.country for r in idx.by_norm.values() if (r.sprite_artist or "").strip()},
+            key=str.lower,
+        )
+        splash_has_primary = sorted(
+            {r.country for r in idx.by_norm.values() if (r.splash_artist or "").strip()},
+            key=str.lower,
+        )
+
+        view = AvailableListView(
+            user_id=interaction.user.id,
+            sprite_needs_primary=sprite_needs_primary,
+            sprite_has_primary=sprite_has_primary,
+            splash_needs_primary=splash_needs_primary,
+            splash_has_primary=splash_has_primary,
+            kind="sprite",
+        )
+
         embed = build_available_embed(
             kind="sprite",
             page=0,
-            sprite_list=sprite_list,
-            splash_list=splash_list,
+            sprite_needs_primary=sprite_needs_primary,
+            sprite_has_primary=sprite_has_primary,
+            splash_needs_primary=splash_needs_primary,
+            splash_has_primary=splash_has_primary,
         )
 
-        await interaction.followup.send(embed=embed, view=view)
+        msg = await interaction.followup.send(embed=embed, view=view)
+        view.message = msg
         return
 
 
@@ -813,26 +991,241 @@ class ArtType(Enum):
     sprite = "sprite"
     both = "both"
 
-@bot.tree.command(name="artist", description="Search for all characters done by a given artist")
-@app_commands.describe(
-    name="Artist name (full or partial)",
-    kind="Filter by splash, sprite, or both",
-)
-@app_commands.choices(
-    kind=[
-        app_commands.Choice(name="Both", value="both"),
-        app_commands.Choice(name="Splash only", value="splash"),
-        app_commands.Choice(name="Sprite only", value="sprite"),
-    ]
-)
-async def artist(
-    interaction: discord.Interaction,
-    name: str,
-    kind: app_commands.Choice[str] = None,
-):
-    await interaction.response.defer()
+def build_artist_embed(
+    *,
+    artist_name: str,
+    kind: str,
+    page: int,
+    sprite_list: List[str],
+    splash_list: List[str],
+) -> discord.Embed:
+    items = sprite_list if kind == "sprite" else splash_list
+    total = len(items)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
 
-    art_type = (kind.value if kind else "both").lower()
+    page = max(0, min(page, total_pages - 1))
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    chunk = items[start:end]
+
+    title = "🎨 Sprite Art" if kind == "sprite" else "🖼️ Splash Art"
+    lines = "\n".join(f"• {c}" for c in chunk) if chunk else "_none_"
+
+    embed = discord.Embed(
+        title=f"Art by {artist_name}",
+        description=(
+            f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})\n"
+            f"{title}\n\n"
+            f"Page **{page+1}/{total_pages}** • **{total}** total"
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.set_thumbnail(url="https://polandballgo.com/assets/logo.png")
+    embed.add_field(name="Characters", value=lines, inline=False)
+    embed.set_footer(text=f"Sourced from {SHEET_NAME}")
+    return embed
+
+
+class ArtistKindSelect(discord.ui.Select):
+    def __init__(self, parent_view: "ArtistListView"):
+        self.parent_view = parent_view
+        options = [
+            discord.SelectOption(label="Sprites", value="sprite", emoji="🎨"),
+            discord.SelectOption(label="Splashes", value="splash", emoji="🖼️"),
+        ]
+        super().__init__(
+            placeholder="Choose Sprite or Splash…",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.parent_view.kind = self.values[0]
+        self.parent_view.page = 0
+
+        embed = build_artist_embed(
+            artist_name=self.parent_view.artist_name,
+            kind=self.parent_view.kind,
+            page=self.parent_view.page,
+            sprite_list=self.parent_view.sprite_list,
+            splash_list=self.parent_view.splash_list,
+        )
+        self.parent_view._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
+class ArtistJumpModal(discord.ui.Modal, title="Jump to page"):
+    page = discord.ui.TextInput(
+        label="Page number",
+        placeholder="e.g. 1",
+        required=True,
+        max_length=5,
+    )
+
+    def __init__(self, parent_view: "ArtistListView"):
+        super().__init__()
+        self.parent_view = parent_view
+        total = self.parent_view._total_pages()
+        self.page.placeholder = f"1 - {total} (integer only)"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        total_pages = self.parent_view._total_pages()
+        raw = (self.page.value or "").strip()
+
+        # Only allow whole integers
+        if not re.fullmatch(r"\d+", raw):
+            await interaction.response.send_message(
+                f"Please enter a whole number between **1** and **{total_pages}**.",
+                ephemeral=True,
+            )
+            return
+
+        n = int(raw)
+        if not (1 <= n <= total_pages):
+            await interaction.response.send_message(
+                f"Page must be between **1** and **{total_pages}**.",
+                ephemeral=True,
+            )
+            return
+
+        self.parent_view.page = n - 1
+
+        embed = build_artist_embed(
+            artist_name=self.parent_view.artist_name,
+            kind=self.parent_view.kind,
+            page=self.parent_view.page,
+            sprite_list=self.parent_view.sprite_list,
+            splash_list=self.parent_view.splash_list,
+        )
+        self.parent_view._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
+class ArtistListView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        user_id: int,
+        artist_name: str,
+        sprite_list: List[str],
+        splash_list: List[str],
+        kind: str = "sprite",
+    ):
+        super().__init__(timeout=600)  # 10 minutes
+        self.message: discord.Message | None = None
+
+        self.user_id = user_id
+        self.artist_name = artist_name
+        self.sprite_list = sprite_list
+        self.splash_list = splash_list
+        self.kind = kind
+        self.page = 0
+
+        self.add_item(ArtistKindSelect(self))
+        self._sync_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This control isn’t for you — run `/artist` to get your own view 🙂",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    def _current_items(self) -> List[str]:
+        return self.sprite_list if self.kind == "sprite" else self.splash_list
+
+    def _total_pages(self) -> int:
+        total = len(self._current_items())
+        return max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    def _sync_buttons(self):
+        total_pages = self._total_pages()
+        on_first = (self.page <= 0)
+        on_last = (self.page >= total_pages - 1)
+
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id == "artist_first":
+                    child.disabled = on_first
+                elif child.custom_id == "artist_prev":
+                    child.disabled = on_first
+                elif child.custom_id == "artist_next":
+                    child.disabled = on_last
+                elif child.custom_id == "artist_last":
+                    child.disabled = on_last
+
+    @discord.ui.button(label="First", style=discord.ButtonStyle.secondary, custom_id="artist_first")
+    async def first_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = 0
+        embed = build_artist_embed(
+            artist_name=self.artist_name,
+            kind=self.kind,
+            page=self.page,
+            sprite_list=self.sprite_list,
+            splash_list=self.splash_list,
+        )
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Prev", style=discord.ButtonStyle.secondary, custom_id="artist_prev")
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = max(0, self.page - 1)
+        embed = build_artist_embed(
+            artist_name=self.artist_name,
+            kind=self.kind,
+            page=self.page,
+            sprite_list=self.sprite_list,
+            splash_list=self.splash_list,
+        )
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, custom_id="artist_next")
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = min(self._total_pages() - 1, self.page + 1)
+        embed = build_artist_embed(
+            artist_name=self.artist_name,
+            kind=self.kind,
+            page=self.page,
+            sprite_list=self.sprite_list,
+            splash_list=self.splash_list,
+        )
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Last", style=discord.ButtonStyle.secondary, custom_id="artist_last")
+    async def last_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = self._total_pages() - 1
+        embed = build_artist_embed(
+            artist_name=self.artist_name,
+            kind=self.kind,
+            page=self.page,
+            sprite_list=self.sprite_list,
+            splash_list=self.splash_list,
+        )
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Jump", style=discord.ButtonStyle.primary, custom_id="artist_jump")
+    async def jump_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ArtistJumpModal(self))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(content="(Expired — run `/artist` again.)", view=self)
+            except Exception:
+                pass
+
+@bot.tree.command(name="artist", description="Search for all characters done by a given artist")
+@app_commands.describe(name="Artist name (full or partial)")
+async def artist(interaction: discord.Interaction, name: str):
+    await interaction.response.defer()
 
     # Load records (reuse cache logic)
     try:
@@ -846,7 +1239,7 @@ async def artist(
         logger.exception("Sheet load failed for /artist")
         await interaction.followup.send(f"Sorry, I couldn't load the sheet: {e}")
         return
-    
+
     def normalize_name(s: str) -> str:
         """
         Normalize artist / query text for fuzzy matching:
@@ -856,13 +1249,11 @@ async def artist(
         """
         if not s:
             return ""
-        # decompose fancy unicode characters
         s = unicodedata.normalize("NFKD", s)
-        # keep only alphabetic characters
         s = "".join(ch for ch in s if ch.isalpha())
         return s.lower()
 
-    FUZZY_THRESHOLD = 0.7  # or whatever you're using
+    FUZZY_THRESHOLD = 0.7
 
     def fuzzy_score(query: str, target: str) -> float:
         """
@@ -881,11 +1272,9 @@ async def artist(
         if not q:
             return 0.0
 
-        # one-letter special case
         if len(q) == 1:
             return 1.0 if t == q else 0.0
 
-        # substring boost: "bread" in "Bread_from_Seoul", "jose" in "Jose11santamari"
         if len(q) >= 3 and q in t:
             return 1.0
 
@@ -894,9 +1283,7 @@ async def artist(
     raw_query = name.strip()
     query_norm = normalize_name(raw_query)
     if not query_norm:
-        await interaction.followup.send(
-            "Please provide at least one letter of an artist name."
-        )
+        await interaction.followup.send("Please provide at least one letter of an artist name.")
         return
 
     # --- FIRST PASS: exact matches only (normalized equality) ---
@@ -920,18 +1307,28 @@ async def artist(
             exact_artist_names.append(raw_sprite)
 
     if exact_splash or exact_sprite:
-        # We found at least one exact artist name match → use ONLY these.
         matches_splash = exact_splash
         matches_sprite = exact_sprite
+        real_artist = exact_artist_names[0] if exact_artist_names else name
+    else:
+        matches_splash = []
+        matches_sprite = []
+        artist_scores: Dict[str, float] = {}
 
-        # pick a display name (just take the first exact artist name)
-        real_artist = exact_artist_names[0]
+        for r in records:
+            raw_splash = (r.splash_artist or "").strip()
+            raw_sprite = (r.sprite_artist or "").strip()
 
-        # apply type filter
-        if art_type == "splash":
-            matches_sprite = []
-        elif art_type == "sprite":
-            matches_splash = []
+            splash_score = fuzzy_score(query_norm, raw_splash) if raw_splash else 0.0
+            sprite_score = fuzzy_score(query_norm, raw_sprite) if raw_sprite else 0.0
+
+            if splash_score >= FUZZY_THRESHOLD:
+                matches_splash.append(r)
+                artist_scores[raw_splash] = max(artist_scores.get(raw_splash, 0.0), splash_score)
+
+            if sprite_score >= FUZZY_THRESHOLD:
+                matches_sprite.append(r)
+                artist_scores[raw_sprite] = max(artist_scores.get(raw_sprite, 0.0), sprite_score)
 
         if not matches_splash and not matches_sprite:
             await interaction.followup.send(
@@ -939,166 +1336,54 @@ async def artist(
             )
             return
 
-    else:
-            matches_splash: List[CountryRecord] = []
-            matches_sprite: List[CountryRecord] = []
-            artist_scores: Dict[str, float] = {}
+        real_artist = max(artist_scores.items(), key=lambda kv: kv[1])[0] if artist_scores else name
 
-            for r in records:
-                raw_splash = (r.splash_artist or "").strip()
-                raw_sprite = (r.sprite_artist or "").strip()
+        # Filter to ONLY that artist
+        target_norm = normalize_name(real_artist)
 
-                splash_score = fuzzy_score(query_norm, raw_splash) if raw_splash else 0.0
-                sprite_score = fuzzy_score(query_norm, raw_sprite) if raw_sprite else 0.0
+        def same_artist(a: str) -> bool:
+            return normalize_name(a) == target_norm
 
-                if splash_score >= FUZZY_THRESHOLD:
-                    matches_splash.append(r)
-                    artist_scores[raw_splash] = max(artist_scores.get(raw_splash, 0.0),
-                                                    splash_score)
+        matches_splash = [r for r in matches_splash if same_artist(r.splash_artist)]
+        matches_sprite = [r for r in matches_sprite if same_artist(r.sprite_artist)]
 
-                if sprite_score >= FUZZY_THRESHOLD:
-                    matches_sprite.append(r)
-                    artist_scores[raw_sprite] = max(artist_scores.get(raw_sprite, 0.0),
-                                                    sprite_score)
-
-            if art_type == "splash":
-                matches_sprite = []
-            elif art_type == "sprite":
-                matches_splash = []
-
-            if not matches_splash and not matches_sprite:
-                await interaction.followup.send(
-                    f"I couldn't find any characters for an artist matching `{name}`."
-                )
-                return
-
-            if artist_scores:
-                real_artist = max(artist_scores.items(), key=lambda kv: kv[1])[0]
-            else:
-                real_artist = name
-
-            # 🔽 NEW: filter to only that artist
-            target_norm = normalize_name(real_artist)
-
-            def same_artist(a: str) -> bool:
-                return normalize_name(a) == target_norm
-
-            matches_splash = [r for r in matches_splash if same_artist(r.splash_artist)]
-            matches_sprite = [r for r in matches_sprite if same_artist(r.sprite_artist)]
-
-            if not matches_splash and not matches_sprite:
-                await interaction.followup.send(
-                    f"I couldn't find any characters for an artist matching `{real_artist}`."
-                )
-                return
-
-    embed = discord.Embed(
-        title=f"Art by {real_artist}",
-        description=(
-            f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})\n"
-        ),
-        color=discord.Color.blurple(),
-    )
-    embed.set_thumbnail(url="https://polandballgo.com/assets/logo.png")
-
-    def format_list(title: str, recs: List[CountryRecord], get_flag) -> None:
-        if not recs:
-        # consistent bold + count even when empty
-            embed.add_field(
-                name=f"**{title} (0)**",
-                value="_none_",   # italic 'none'
-                inline=False,
+        if not matches_splash and not matches_sprite:
+            await interaction.followup.send(
+                f"I couldn't find any characters for an artist matching `{real_artist}`."
             )
             return
 
-        recs_sorted = sorted(recs, key=lambda r: r.country.lower())
+    # Convert matched records -> lists of countries
+    sprite_list = sorted({r.country for r in matches_sprite if r.country}, key=str.lower)
+    splash_list = sorted({r.country for r in matches_splash if r.country}, key=str.lower)
 
-        buckets = {
-            "Complete": [],
-            "In progress": [],
-            "No status": [],
-            "Other": [],
-        }
-
-        for r in recs_sorted:
-            label = format_ready_flag(get_flag(r))
-            if label not in buckets:
-                buckets["Other"].append(r)
-            else:
-                buckets[label].append(r)
-
-        max_len = 1000  # keep some headroom under Discord's 1024 limit
-        lines: List[str] = []
-        current_len = 0
-        hidden_count = 0
-
-        order = ["Complete", "In progress", "No status", "Other"]
-
-        for label in order:
-            items = buckets[label]
-            if not items:
-                continue
-
-            icon = ready_icon(label)
-            header = f"{icon} **{label} ({len(items)})**"
-
-            # If even the header doesn't fit, bail out
-            if current_len + len(header) + 1 > max_len:
-                hidden_count += sum(len(buckets[l]) for l in order[order.index(label):])
-                break
-
-            lines.append(header)
-            current_len += len(header) + 1  # + newline
-
-            for r in items:
-                line = f"• {r.country}"
-                if current_len + len(line) + 1 > max_len:
-                    # count this item + all remaining items in all remaining buckets
-                    hidden_count += 1  # this one
-                    # remaining in this bucket
-                    remaining_here = len(items) - (items.index(r) + 1)
-                    hidden_count += remaining_here
-                    # remaining in later buckets
-                    for later_label in order[order.index(label) + 1:]:
-                        hidden_count += len(buckets[later_label])
-                    # stop adding lines entirely
-                    break
-                lines.append(line)
-                current_len += len(line) + 1
-            else:
-                # finished this bucket normally -> add a blank line
-                lines.append("")
-                current_len += 1
-                continue  # go to next bucket
-
-            # we broke from the inner loop because of length, so stop outer too
-            break
-
-        # remove trailing blank
-        if lines and lines[-1] == "":
-            lines.pop()
-
-        if hidden_count > 0:
-            lines.append(f"… and {hidden_count} more")
-
-        value = "\n".join(lines)
-
-        embed.add_field(
-            name=f"**{title} ({len(recs_sorted)}**)",  
-            value=value,
-            inline=False,
+    if not sprite_list and not splash_list:
+        await interaction.followup.send(
+            f"I couldn't find any characters for an artist matching `{real_artist}`."
         )
+        return
 
+    # Default tab: Sprite if any, else Splash
+    kind = "sprite" if sprite_list else "splash"
 
-    if art_type in ("both", "splash"):
-        format_list("*🎨 Splash Art*", matches_splash, lambda r: r.splash_rdy)
+    view = ArtistListView(
+        user_id=interaction.user.id,
+        artist_name=real_artist,
+        sprite_list=sprite_list,
+        splash_list=splash_list,
+        kind=kind,
+    )
 
-    if art_type in ("both", "sprite"):
-        divider = "⠂" * 12
-        embed.add_field(name=divider, value="", inline=False)
-        format_list("*🎨 Sprite Art*", matches_sprite, lambda r: r.sprite_rdy)
+    embed = build_artist_embed(
+        artist_name=real_artist,
+        kind=kind,
+        page=0,
+        sprite_list=sprite_list,
+        splash_list=splash_list,
+    )
 
-    await interaction.followup.send(embed=embed)
+    msg = await interaction.followup.send(embed=embed, view=view)
+    view.message = msg
 
 CATEGORY_CHOICES = ["Sprite", "Splash"]
 
