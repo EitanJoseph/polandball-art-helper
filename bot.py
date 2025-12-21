@@ -102,7 +102,7 @@ UNAVAILABLE_VALUES = set(
     if v.strip()
 )
 
-ART_ROOT_FOLDER_ID = "1UrkcyLNZzt5YG20zo0vEAiFU1xXSEeu2"
+ART_ROOT_FOLDER_ID = os.getenv("ART_ROOT_FOLDER_ID")
 CACHE_TTL_SECS = int(os.getenv("CACHE_TTL_SECS", "60"))
 
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
@@ -1387,7 +1387,6 @@ async def artist(interaction: discord.Interaction, name: str):
 
 CATEGORY_CHOICES = ["Sprite", "Splash"]
 
-
 def convert_png_to_webp(png_path: str) -> str:
     """
     Converts a PNG file to WEBP and returns the new WEBP path.
@@ -1584,43 +1583,40 @@ async def help_command(interaction: discord.Interaction):
         "• `image` – **PNG only**\n\n"
         "**/available** `[character]`\n"
         "• No name → lists all characters that are available as sprites / splashes\n"
-        "• With a name → shows if that character’s sprite/splash is available or claimed\n\n"
-        "**/artist** `name` `[kind]`\n"
-        "• Shows which characters a given artist has done (sprite / splash / both)\n\n"
+        "• With a name → shows if that character’s sprite/splash is available\n\n"
+        "**/artist** `[name]`\n"
+        "• Shows which characters a given artist has done (sprites & splashes)\n\n"
         "**/ping**\n"
-        "• Quick check that the bot is alive (replies with `pong`)."
+        "• Quick check that the bot is alive (replies with `pong`)"
     )
 
     # --- Sprite vs Splash section ---
     art_types_text = (
         "**Splash Art**\n"
-        "• Detailed, stylized illustration (often with a background)\n"
-        "• Used in character / showcase screens\n"
-        "• Wide banners (around 3:2) look best\n"
-        "• Main focus must be the **main countryball** – side characters are okay "
-        "as long as they don't steal the spotlight\n\n"
+        "• Detailed illustrations, often with a background or extra elements\n"
+        "• Used in character screens\n"
+        "• Aspect ratio is flexible, but wide banners **(3:2 ratio)** work best\n"
+        "• Should primarily feature the main countryball, but you can include other balls as side characters if they don’t steal the spotlight\n"
+        "• Think of these as the “showcase” artworks!\n\n"
         "**Sprite Art**\n"
-        "• Simple, clean countryball with **no background**\n"
-        "• Used as the in-game character model\n"
-        "• Less detail – they’ll be small on screen, too much detail won’t be visible\n"
-        "• A subtle shadow under the ball helps it feel grounded in-game\n"
-        "• Think of sprites as the **playable** versions of the balls."
+        "• Simpler, clean countryball designs **without backgrounds**\n"
+        "• Used as in-game characters\n"
+        "• Less detailed than splash art, since they’ll be shown smaller on screen (too much detail won’t be visible)\n"
+        "• Sprites will look best with a subtle bottom shadow to give each character a sense of grounding in-game\n"
+        "• These are the “playable” versions of the balls"
     )
 
     # --- Core Polandball drawing rules (short version) ---
     polandball_rules_text = (
-        "**Basic style**\n"
-        "• Draw the ball **by hand with the mouse** – no circle tools, shape tools or "
-        "vector-perfect outlines.\n"
-        "• **No anti-aliasing** – outlines must be **hard-edged and pixel-clean** (no soft or blurry edges).\n"
-        "• Simple colours, no fancy gradients or 3D rendering.\n"
-        "• Eyes only (no mouths or noses in normal cases) – two white circles with black pupils.\n\n"
-        "**Flags & shapes**\n"
-        "• Use the **correct flag colours and layout** for each country.\n"
-        "• Polandball is traditionally drawn **upside down** (white on top, red on bottom, "
-        "but the ball is flipped).\n"
-        "• Balls stay round – no country-shaped blobs or detailed maps."
+        "• **No anti-aliasing** — must be pure pixel art (hard edges only)\n"
+        "• **No eyelashes, hair, limbs, pupils, or mouths**\n"
+        "• **No lines separating flag colours** — colours must touch directly\n"
+        "• **No circle, line, or shape tools of any kind**\n"
+        "• **Everything must be hand-drawn**\n"
+        "• **No AI-generated art**\n"
+        "• **No overly realistic or highly detailed art** (backgrounds are an exception)"
     )
+
 
     embed = discord.Embed(
         title="Polandball Go Art Helper – Help",
