@@ -825,11 +825,11 @@ class SuggestionView(discord.ui.View):
 def build_character_embed(rec: "CountryRecord") -> discord.Embed:
     ig = rec.in_game_status()
     if ig is True:
-        ig_text = "🟢 In Game"
-        color = discord.Color.green()
+        ig_text = "🔵 In Game"
+        color = discord.Color.blue()
     elif ig is False:
         ig_text = "🔴 Not In Game"
-        color = discord.Color.light_grey()
+        color = discord.Color.red()
     else:
         ig_text = "⚪ In-game status unknown"
         color = discord.Color.light_grey()
@@ -838,21 +838,31 @@ def build_character_embed(rec: "CountryRecord") -> discord.Embed:
         s = (s or "").strip()
         return f"`{s}`" if s else "`—`"
 
-    sprite_lines = [
-        f"🖌️ **Current Artist:** {fmt_name(rec.sprite_artist)}",
-        f"**Status:** `{format_ready_flag(rec.sprite_rdy)}`",
-        "",
-        f"🧩 **Alternative Artist(s):** {fmt_name(rec.sprite_artist_alt)}",
-        "**Alt submissions:** ✅ Open",
-    ]
+    sprite_lines = []
 
-    splash_lines = [
-        f"🖌️ **Current Artist:** {fmt_name(rec.splash_artist)}",
-        f"**Status:** `{format_ready_flag(rec.splash_rdy)}`",
-        "",
-        f"🧩 **Alternative Artist(s):** {fmt_name(rec.splash_artist_alt)}",
-        "**Alt submissions:** ✅ Open",
-    ]
+    if not has_primary_artist(rec.sprite_artist):
+        sprite_lines.append("✅ **Primary art submission available**")
+    else:
+        sprite_lines.extend([
+            f"🖌️ **Current Artist:** {fmt_name(rec.sprite_artist)}",
+            f"**Status:** `{format_ready_flag(rec.sprite_rdy)}`",
+            "",
+            f"🧩 **Alternative Artist(s):** {fmt_name(rec.sprite_artist_alt)}",
+            "**Alt submissions:** ✅ Open",
+        ])
+
+    splash_lines = []
+
+    if not has_primary_artist(rec.splash_artist):
+        splash_lines.append("✅ **Primary art submission available**")
+    else:
+        splash_lines.extend([
+            f"🖌️ **Current Artist:** {fmt_name(rec.splash_artist)}",
+            f"**Status:** `{format_ready_flag(rec.splash_rdy)}`",
+            "",
+            f"🧩 **Alternative Artist(s):** {fmt_name(rec.splash_artist_alt)}",
+            "**Alt submissions:** ✅ Open",
+        ])
 
     embed = discord.Embed(
         title=rec.country,
@@ -863,7 +873,7 @@ def build_character_embed(rec: "CountryRecord") -> discord.Embed:
     embed.set_thumbnail(url="https://polandballgo.com/assets/logo.png")
     embed.add_field(name="Sprite", value="\n".join(sprite_lines), inline=True)
     embed.add_field(name="Splash", value="\n".join(splash_lines), inline=True)
-    embed.set_footer(text=f"Sourced from {SHEET_NAME}")
+    embed.set_footer(text=f"Sourced from {SHEET_NAME}\nUpdated every {CACHE_TTL_SECS}s")
     return embed
 
 
@@ -962,6 +972,9 @@ async def available(interaction: discord.Interaction, character: Optional[str] =
     )
     return
 
+def has_primary_artist(name: str) -> bool:
+    return bool((name or "").strip())
+
 def format_ready_flag(raw: str) -> str:
     s = (raw or "").strip().lower()
     if not s:
@@ -1008,13 +1021,14 @@ def build_artist_embed(
     end = start + PAGE_SIZE
     chunk = items[start:end]
 
-    title = "🎨 Sprite Art" if kind == "sprite" else "🖼️ Splash Art"
+    title = "🎨 **Sprite Art**" if kind == "sprite" else "🖼️ **Splash Art**"
     lines = "\n".join(f"• {c}" for c in chunk) if chunk else "_none_"
 
     embed = discord.Embed(
         title=f"Art by {artist_name}",
         description=(
             f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})\n"
+            f"Updated every {CACHE_TTL_SECS}s\n\n"
             f"{title}\n\n"
             f"Page **{page+1}/{total_pages}** • **{total}** total"
         ),
@@ -1022,7 +1036,6 @@ def build_artist_embed(
     )
     embed.set_thumbnail(url="https://polandballgo.com/assets/logo.png")
     embed.add_field(name="Characters", value=lines, inline=False)
-    embed.set_footer(text=f"Sourced from {SHEET_NAME}")
     return embed
 
 
