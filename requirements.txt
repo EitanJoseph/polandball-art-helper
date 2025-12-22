@@ -1,3 +1,6 @@
 discord.py>=2.0
 gspread
+google-api-python-client
 google-auth
+google-auth-oauthlib
+Pillow
