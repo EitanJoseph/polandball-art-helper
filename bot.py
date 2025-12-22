@@ -78,6 +78,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 from PIL import Image
+Image.MAX_IMAGE_PIXELS = 12_000_000  # ~12MP safety cap to prevent memory spikes
 
 # For local test only
 # from dotenv import load_dotenv
@@ -1408,16 +1409,33 @@ async def artist(interaction: discord.Interaction, name: str):
             )
             return
 
-    # Convert matched records -> (country, status) pairs
-    sprite_items = sorted(
-        [(r.country, format_ready_flag(r.sprite_rdy)) for r in matches_sprite if r.country],
-        key=lambda x: x[0].lower(),
-    )
+    # Convert matched records -> (country, status) pairs (DEDUP by country)
+    sprite_map: dict[str, str] = {}
+    for r in matches_sprite:
+        if not r.country:
+            continue
+        country = r.country.strip()
+        status = format_ready_flag(r.sprite_rdy)
 
-    splash_items = sorted(
-        [(r.country, format_ready_flag(r.splash_rdy)) for r in matches_splash if r.country],
-        key=lambda x: x[0].lower(),
-    )
+        # Prefer "Complete" if duplicates exist
+        if country not in sprite_map or (sprite_map[country] != "Complete" and status == "Complete"):
+            sprite_map[country] = status
+
+    sprite_items = sorted(sprite_map.items(), key=lambda x: x[0].lower())
+
+    splash_map: dict[str, str] = {}
+    for r in matches_splash:
+        if not r.country:
+            continue
+        country = r.country.strip()
+        status = format_ready_flag(r.splash_rdy)
+
+        # Prefer "Complete" if duplicates exist
+        if country not in splash_map or (splash_map[country] != "Complete" and status == "Complete"):
+            splash_map[country] = status
+
+    splash_items = sorted(splash_map.items(), key=lambda x: x[0].lower())
+
 
     if not sprite_items and not splash_items:
         await interaction.followup.send(
@@ -1454,21 +1472,24 @@ async def run_blocking(fn, *args, timeout: int = 60, **kwargs):
 CATEGORY_CHOICES = ["Sprite", "Splash"]
 
 def convert_png_to_webp(png_path: str) -> str:
-    """
-    Converts a PNG file to WEBP and returns the new WEBP path.
-    Keeps transparency intact.
-    """
     webp_path = os.path.splitext(png_path)[0] + ".webp"
 
-    with Image.open(png_path) as img:
-        img.save(
-            webp_path,
-            format="WEBP",
-            lossless=True,   # preserve crisp pixel edges
-            quality=100,
-        )
+    with Image.open(png_path) as im:
+        im.load()  # force decode now
+
+        # ✅ cap dimensions to keep memory/CPU predictable
+        MAX_DIM = 2048  # if you still hit limits, drop to 1536 or 1024
+        if im.width > MAX_DIM or im.height > MAX_DIM:
+            im.thumbnail((MAX_DIM, MAX_DIM), Image.LANCZOS)
+
+        # convert after resize (cheaper)
+        if im.mode not in ("RGB", "RGBA"):
+            im = im.convert("RGBA")
+
+        im.save(webp_path, "WEBP", quality=90, method=6)
 
     return webp_path
+
 
 def get_custom_emoji(bot: commands.Bot, emoji_name: str) -> str:
     """
@@ -1507,7 +1528,7 @@ async def submit_art(
     try:
         # --- 1) Enforce country must be from spreadsheet ---
         try:
-            idx = await run_blocking(bot._load_index, timeout=25)  # AvailabilityIndex built from your sheet
+            idx = await run_blocking(bot._load_index, timeout=30)  # AvailabilityIndex built from your sheet
             await interaction.followup.send(
                 "Step 2/4: Converting image…",
                 ephemeral=True,
@@ -1558,7 +1579,7 @@ async def submit_art(
             discord_username = interaction.user.name  # or .display_name if you want
 
             # Convert PNG → WEBP (blocking) off the event loop
-            webp_path = await run_blocking(convert_png_to_webp, tmp_path, timeout=30)
+            webp_path = await run_blocking(convert_png_to_webp, tmp_path, timeout=120)
 
             await interaction.followup.send(
                     "Step 3/4: Uploading files to Google Drive…",
@@ -1716,6 +1737,12 @@ async def help_command(interaction: discord.Interaction):
         value=polandball_rules_text,
         inline=False,
     )
+    embed.add_field(
+        name="📩 Support",
+        value="Contact <@1091755544177557626> for any bot-related questions.",
+        inline=False,
+    )
+
     embed.set_footer(
         text="Based on the r/Polandball “Académie Polandballaise” tutorial and community rules."
     )
