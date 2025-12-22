@@ -828,8 +828,8 @@ def build_character_embed(rec: "CountryRecord") -> discord.Embed:
         ig_text = "🔵 In Game"
         color = discord.Color.blue()
     elif ig is False:
-        ig_text = "🔴 Not In Game"
-        color = discord.Color.red()
+        ig_text = "🟢 Available"
+        color = discord.Color.green()
     else:
         ig_text = "⚪ In-game status unknown"
         color = discord.Color.light_grey()
@@ -871,8 +871,12 @@ def build_character_embed(rec: "CountryRecord") -> discord.Embed:
         color=color,
     )
     embed.set_thumbnail(url="https://polandballgo.com/assets/logo.png")
-    embed.add_field(name="Sprite", value="\n".join(sprite_lines), inline=True)
+    # add a little padding at the end of sprite so mobile has a gap before Splash
+    sprite_lines_padded = sprite_lines + ["\u200b"]  # invisible spacer lines
+
+    embed.add_field(name="Sprite", value="\n".join(sprite_lines_padded), inline=True)
     embed.add_field(name="Splash", value="\n".join(splash_lines), inline=True)
+
     embed.set_footer(text=f"Sourced from {SHEET_NAME}\nUpdated every {CACHE_TTL_SECS}s")
     return embed
 
@@ -1009,33 +1013,70 @@ def build_artist_embed(
     artist_name: str,
     kind: str,
     page: int,
-    sprite_list: List[str],
-    splash_list: List[str],
+    sprite_items: list[tuple[str, str]],
+    splash_items: list[tuple[str, str]],
 ) -> discord.Embed:
-    items = sprite_list if kind == "sprite" else splash_list
+    # Pick data set
+    items = sprite_items if kind == "sprite" else splash_items
     total = len(items)
+
+    # --- overall totals (ALL pages) ---
+    complete_all = [c for (c, status) in items if status == "Complete"]
+    inprog_all = [c for (c, status) in items if status == "In progress"]
+    other_all = [c for (c, status) in items if status not in {"Complete", "In progress"}]
+
+    # --- pagination ---
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-
     page = max(0, min(page, total_pages - 1))
+
     start = page * PAGE_SIZE
-    end = start + PAGE_SIZE
-    chunk = items[start:end]
+    end = min(total, start + PAGE_SIZE)
+    page_slice = items[start:end]
 
-    title = "🎨 **Sprite Art**" if kind == "sprite" else "🖼️ **Splash Art**"
-    lines = "\n".join(f"• {c}" for c in chunk) if chunk else "_none_"
+    # --- page-only groups ---
+    complete_page = [c for (c, status) in page_slice if status == "Complete"]
+    inprog_page = [c for (c, status) in page_slice if status == "In progress"]
+    other_page = [c for (c, status) in page_slice if status not in {"Complete", "In progress"}]
 
+    # --- embed base ---
     embed = discord.Embed(
         title=f"Art by {artist_name}",
-        description=(
-            f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})\n"
-            f"Updated every {CACHE_TTL_SECS}s\n\n"
-            f"{title}\n\n"
-            f"Page **{page+1}/{total_pages}** • **{total}** total"
-        ),
+        description=f"Sourced from [{SHEET_NAME}]({GOOGLE_SHEET_URL})",
         color=discord.Color.blurple(),
     )
     embed.set_thumbnail(url="https://polandballgo.com/assets/logo.png")
-    embed.add_field(name="Characters", value=lines, inline=False)
+
+    kind_label = "Sprite Art" if kind == "sprite" else "Splash Art"
+    embed.add_field(
+        name=f"🎨 {kind_label}",
+        value=f"Page {page + 1}/{total_pages} • {total} total",
+        inline=False,
+    )
+
+    # --- content ---
+    lines = []
+
+    # ✅ show OVERALL totals, list PAGE items
+    if complete_page:
+        lines.append(f"✅ **Complete ({len(complete_all)})**")
+        lines.extend(f"• {c}" for c in complete_page)
+
+    if complete_page and inprog_page:
+        lines.append("")
+
+    if inprog_page:
+        lines.append(f"⏳ **In progress ({len(inprog_all)})**")
+        lines.extend(f"• {c}" for c in inprog_page)
+
+    if complete_page and inprog_page:
+        lines.append("")
+
+    if other_page:
+        lines.append(f"⚪ **Other ({len(other_all)})**")
+        lines.extend(f"• {c}" for c in other_page)
+
+    embed.add_field(name="\u200b", value="\n".join(lines), inline=False)
+
     return embed
 
 
@@ -1061,8 +1102,8 @@ class ArtistKindSelect(discord.ui.Select):
             artist_name=self.parent_view.artist_name,
             kind=self.parent_view.kind,
             page=self.parent_view.page,
-            sprite_list=self.parent_view.sprite_list,
-            splash_list=self.parent_view.splash_list,
+            sprite_items=self.parent_view.sprite_items,
+            splash_items=self.parent_view.splash_items,
         )
         self.parent_view._sync_buttons()
         await interaction.response.edit_message(embed=embed, view=self.parent_view)
@@ -1086,7 +1127,6 @@ class ArtistJumpModal(discord.ui.Modal, title="Jump to page"):
         total_pages = self.parent_view._total_pages()
         raw = (self.page.value or "").strip()
 
-        # Only allow whole integers
         if not re.fullmatch(r"\d+", raw):
             await interaction.response.send_message(
                 f"Please enter a whole number between **1** and **{total_pages}**.",
@@ -1108,8 +1148,8 @@ class ArtistJumpModal(discord.ui.Modal, title="Jump to page"):
             artist_name=self.parent_view.artist_name,
             kind=self.parent_view.kind,
             page=self.parent_view.page,
-            sprite_list=self.parent_view.sprite_list,
-            splash_list=self.parent_view.splash_list,
+            sprite_items=self.parent_view.sprite_items,
+            splash_items=self.parent_view.splash_items,
         )
         self.parent_view._sync_buttons()
         await interaction.response.edit_message(embed=embed, view=self.parent_view)
@@ -1121,8 +1161,8 @@ class ArtistListView(discord.ui.View):
         *,
         user_id: int,
         artist_name: str,
-        sprite_list: List[str],
-        splash_list: List[str],
+        sprite_items: List[tuple[str, str]],
+        splash_items: List[tuple[str, str]],
         kind: str = "sprite",
     ):
         super().__init__(timeout=600)  # 10 minutes
@@ -1130,8 +1170,8 @@ class ArtistListView(discord.ui.View):
 
         self.user_id = user_id
         self.artist_name = artist_name
-        self.sprite_list = sprite_list
-        self.splash_list = splash_list
+        self.sprite_items = sprite_items
+        self.splash_items = splash_items
         self.kind = kind
         self.page = 0
 
@@ -1147,8 +1187,8 @@ class ArtistListView(discord.ui.View):
             return False
         return True
 
-    def _current_items(self) -> List[str]:
-        return self.sprite_list if self.kind == "sprite" else self.splash_list
+    def _current_items(self):
+        return self.sprite_items if self.kind == "sprite" else self.splash_items
 
     def _total_pages(self) -> int:
         total = len(self._current_items())
@@ -1177,8 +1217,8 @@ class ArtistListView(discord.ui.View):
             artist_name=self.artist_name,
             kind=self.kind,
             page=self.page,
-            sprite_list=self.sprite_list,
-            splash_list=self.splash_list,
+            sprite_items=self.sprite_items,
+            splash_items=self.splash_items,
         )
         self._sync_buttons()
         await interaction.response.edit_message(embed=embed, view=self)
@@ -1190,8 +1230,8 @@ class ArtistListView(discord.ui.View):
             artist_name=self.artist_name,
             kind=self.kind,
             page=self.page,
-            sprite_list=self.sprite_list,
-            splash_list=self.splash_list,
+            sprite_items=self.sprite_items,
+            splash_items=self.splash_items,
         )
         self._sync_buttons()
         await interaction.response.edit_message(embed=embed, view=self)
@@ -1203,8 +1243,8 @@ class ArtistListView(discord.ui.View):
             artist_name=self.artist_name,
             kind=self.kind,
             page=self.page,
-            sprite_list=self.sprite_list,
-            splash_list=self.splash_list,
+            sprite_items=self.sprite_items,
+            splash_items=self.splash_items,
         )
         self._sync_buttons()
         await interaction.response.edit_message(embed=embed, view=self)
@@ -1216,8 +1256,8 @@ class ArtistListView(discord.ui.View):
             artist_name=self.artist_name,
             kind=self.kind,
             page=self.page,
-            sprite_list=self.sprite_list,
-            splash_list=self.splash_list,
+            sprite_items=self.sprite_items,
+            splash_items=self.splash_items,
         )
         self._sync_buttons()
         await interaction.response.edit_message(embed=embed, view=self)
@@ -1234,6 +1274,7 @@ class ArtistListView(discord.ui.View):
                 await self.message.edit(content="(Expired — run `/artist` again.)", view=self)
             except Exception:
                 pass
+
 
 @bot.tree.command(name="artist", description="Search for all characters done by a given artist")
 @app_commands.describe(name="Artist name (full or partial)")
@@ -1366,24 +1407,31 @@ async def artist(interaction: discord.Interaction, name: str):
             )
             return
 
-    # Convert matched records -> lists of countries
-    sprite_list = sorted({r.country for r in matches_sprite if r.country}, key=str.lower)
-    splash_list = sorted({r.country for r in matches_splash if r.country}, key=str.lower)
+    # Convert matched records -> (country, status) pairs
+    sprite_items = sorted(
+        [(r.country, format_ready_flag(r.sprite_rdy)) for r in matches_sprite if r.country],
+        key=lambda x: x[0].lower(),
+    )
 
-    if not sprite_list and not splash_list:
+    splash_items = sorted(
+        [(r.country, format_ready_flag(r.splash_rdy)) for r in matches_splash if r.country],
+        key=lambda x: x[0].lower(),
+    )
+
+    if not sprite_items and not splash_items:
         await interaction.followup.send(
             f"I couldn't find any characters for an artist matching `{real_artist}`."
         )
         return
 
     # Default tab: Sprite if any, else Splash
-    kind = "sprite" if sprite_list else "splash"
+    kind = "sprite" if sprite_items else "splash"
 
     view = ArtistListView(
         user_id=interaction.user.id,
         artist_name=real_artist,
-        sprite_list=sprite_list,
-        splash_list=splash_list,
+        sprite_items=sprite_items,
+        splash_items=splash_items,
         kind=kind,
     )
 
@@ -1391,8 +1439,8 @@ async def artist(interaction: discord.Interaction, name: str):
         artist_name=real_artist,
         kind=kind,
         page=0,
-        sprite_list=sprite_list,
-        splash_list=splash_list,
+        sprite_items=sprite_items,
+        splash_items=splash_items,
     )
 
     msg = await interaction.followup.send(embed=embed, view=view)
