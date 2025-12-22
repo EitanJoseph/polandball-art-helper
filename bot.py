@@ -80,8 +80,8 @@ from googleapiclient.http import MediaFileUpload
 from PIL import Image
 
 # For local test only
-from dotenv import load_dotenv
-load_dotenv()
+# from dotenv import load_dotenv
+# load_dotenv()
 
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
