@@ -102,6 +102,7 @@ UNAVAILABLE_VALUES = set(
     if v.strip()
 )
 
+
 ART_ROOT_FOLDER_ID = os.getenv("ART_ROOT_FOLDER_ID")
 CACHE_TTL_SECS = int(os.getenv("CACHE_TTL_SECS", "60"))
 
@@ -1446,6 +1447,10 @@ async def artist(interaction: discord.Interaction, name: str):
     msg = await interaction.followup.send(embed=embed, view=view)
     view.message = msg
 
+async def run_blocking(fn, *args, timeout: int = 60, **kwargs):
+    return await asyncio.wait_for(asyncio.to_thread(fn, *args, **kwargs), timeout=timeout)
+
+
 CATEGORY_CHOICES = ["Sprite", "Splash"]
 
 def convert_png_to_webp(png_path: str) -> str:
@@ -1491,14 +1496,22 @@ async def submit_art(
     country: str,
     image: discord.Attachment,
 ):
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.followup.send(
+        "Step 1/4: Validating submission…",
+        ephemeral=True,
+    )
 
     tmp_path: Optional[str] = None
 
     try:
         # --- 1) Enforce country must be from spreadsheet ---
         try:
-            idx = bot._load_index()  # AvailabilityIndex built from your sheet
+            idx = await run_blocking(bot._load_index, timeout=25)  # AvailabilityIndex built from your sheet
+            await interaction.followup.send(
+                "Step 2/4: Converting image…",
+                ephemeral=True,
+            )
             valid_countries = set(idx.all_names)
         except Exception as e:
             logger.exception("Failed to load index for submit_art: %s", e)
@@ -1532,49 +1545,62 @@ async def submit_art(
             return
 
         # 3) Use system temp directory (cross-platform)
-        tmp_dir = tempfile.gettempdir()
-        os.makedirs(tmp_dir, exist_ok=True)
+        webp_path: Optional[str] = None
 
-        tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4()}{ext}")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4()}{ext}")
 
-        # Save Discord attachment to temp file
-        await image.save(tmp_path)
+            # Save Discord attachment to temp file
+            await image.save(tmp_path)
 
-        # 4) Upload to Drive: Country / [Sprite|Splash] / discordUser.artist.country.png
-        service = interaction.client.drive_service
-        discord_username = interaction.user.name  # or .display_name if you want
+            # 4) Upload to Drive: Country / [Sprite|Splash] / discordUser.artist.country.png
+            service = interaction.client.drive_service
+            discord_username = interaction.user.name  # or .display_name if you want
 
-        # Convert PNG → WEBP
-        webp_path = convert_png_to_webp(tmp_path)
+            # Convert PNG → WEBP (blocking) off the event loop
+            webp_path = await run_blocking(convert_png_to_webp, tmp_path, timeout=30)
 
-        # Upload PNG
-        drive_file_png, drive_path_png = upload_art_to_drive(
-            service=service,
-            local_path=tmp_path,
-            category=category.value,
-            country=country,
-            discord_username=discord_username,
-            artist_name=artist_name,
-        )
+            await interaction.followup.send(
+                    "Step 3/4: Uploading files to Google Drive…",
+                    ephemeral=True,
+                )
+            # Upload PNG (blocking) off the event loop
+            drive_file_png, drive_path_png = await run_blocking(
+                upload_art_to_drive,
+                service,
+                tmp_path,
+                category=category.value,
+                country=country,
+                discord_username=discord_username,
+                artist_name=artist_name,
+                timeout=120,
+            )
 
-        # Upload WEBP
-        drive_file_webp, drive_path_webp = upload_art_to_drive(
-            service=service,
-            local_path=webp_path,
-            category=category.value,
-            country=country,
-            discord_username=discord_username,
-            artist_name=artist_name,
-        )
+            # Upload WEBP (blocking) off the event loop
+            drive_file_webp, drive_path_webp = await run_blocking(
+                upload_art_to_drive,
+                service,
+                webp_path,
+                category=category.value,
+                country=country,
+                discord_username=discord_username,
+                artist_name=artist_name,
+                timeout=120,
+            )
 
         view_link_png = drive_file_png.get("webViewLink", "")
         view_link_webp = drive_file_webp.get("webViewLink", "")
 
+        await interaction.followup.send(
+            "Step 4/4: Finalizing submission…",
+            ephemeral=True,
+        )
         fire_emoji = get_custom_emoji(bot, "PoleonFire")
         await interaction.followup.send(
             "✅ **Submission received!**\n\n"
             "Your art has been successfully submitted.\n"
-            "You'll be contacted if any changes are needed. Thank you for helping bring Polandball Go to life! {fire_emoji}",
+            f"You'll be contacted if any changes are needed. Thank you for helping bring Polandball Go to life! {fire_emoji}",
+
             # f"**PNG:** {drive_path_png}\n{view_link_png}\n\n"
             # f"**WEBP:** {drive_path_webp}\n{view_link_webp}",
             ephemeral=True,
@@ -1586,13 +1612,6 @@ async def submit_art(
             f"❌ Something went wrong while uploading your art:\n`{e}`",
             ephemeral=True,
         )
-
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
 
 SPRITE_EXAMPLE_URL = "https://raw.githubusercontent.com/wwxiao09/polandball-art-helper/669d6100bce364b77d74b90885830fa85b6b0231/denmark.png"
 
