@@ -1607,11 +1607,14 @@ async def submit_art(
         )
 
     except Exception as e:
-        logger.exception("submit_art failed")
+        import traceback
+        traceback.print_exc()  # shows full error in your bot logs/console
+
         await interaction.followup.send(
-            f"❌ Something went wrong while uploading your art:\n`{e}`",
+            f"❌ Something went wrong while uploading your art:\n`{type(e).__name__}: {str(e) or repr(e)}`",
             ephemeral=True,
         )
+
 
 SPRITE_EXAMPLE_URL = "https://raw.githubusercontent.com/wwxiao09/polandball-art-helper/669d6100bce364b77d74b90885830fa85b6b0231/denmark.png"
 
