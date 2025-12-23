@@ -74,6 +74,9 @@ from google.auth import default as google_auth_default
 import tempfile
 import uuid
 
+import errno
+import random
+
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
@@ -1497,6 +1500,17 @@ def get_custom_emoji(bot: commands.Bot, emoji_name: str) -> str:
     emoji = discord.utils.get(bot.emojis, name=emoji_name)
     return str(emoji) if emoji else f":{emoji_name}:"
 
+async def retry_run_blocking(callable_fn, attempts: int = 3, base_delay: float = 1.0):
+    last_exc = None
+    for i in range(attempts):
+        try:
+            return await callable_fn()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError) as e:
+            last_exc = e
+            if isinstance(e, OSError) and e.errno not in (errno.EPIPE, errno.ECONNRESET, errno.ETIMEDOUT, None):
+                raise
+            await asyncio.sleep(base_delay * (2 ** i) + random.random())
+    raise last_exc
 
 @bot.tree.command(name="submit", description="Submit art")
 @app_commands.describe(
@@ -1572,36 +1586,39 @@ async def submit_art(
             ephemeral=True,
         )
 
-        drive_file_png, drive_path_png = await run_blocking(
-            upload_art_to_drive,
-            service,
-            tmp_path,
-            category=category.value,
-            country=country,
-            discord_username=discord_username,
-            artist_name=artist_name,
-            timeout=120,
-        )
-
-        await interaction.followup.send(
-            "Step 3/3: Finalizing Submission...",
-            ephemeral=True,
-        )
-
-        fire_emoji = get_custom_emoji(bot, "PoleonFire")
-        await interaction.followup.send(
-            "✅ **Submission received!**\n\n"
-            "Your art has been uploaded successfully.\n"
-            f"You'll be contacted if any changes are needed. Thank you for helping bring Polandball Go to life! {fire_emoji}",
-            ephemeral=True,
-        )
-            
         try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+            _, _ = await retry_run_blocking(lambda: run_blocking(
+                upload_art_to_drive,
+                service,
+                tmp_path,
+                category=category.value,
+                country=country,
+                discord_username=discord_username,
+                artist_name=artist_name,
+                timeout=180,
+            ))
 
-        return
+            await interaction.followup.send(
+                "Step 3/3: Finalizing Submission...",
+                ephemeral=True,
+            )
+
+            fire_emoji = get_custom_emoji(bot, "PoleonFire")
+            await interaction.followup.send(
+                "✅ **Submission received!**\n\n"
+                "Your art has been uploaded successfully.\n"
+                f"You'll be contacted if any changes are needed. Thank you for helping bring Polandball Go to life! {fire_emoji}",
+                ephemeral=True,
+            )
+            return
+
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
 
 
     except Exception as e:
@@ -1623,32 +1640,33 @@ SPLASH_EXAMPLE_URL = "https://raw.githubusercontent.com/wwxiao09/polandball-art-
 @submit_art.autocomplete("country")
 async def submit_art_country_autocomplete(interaction: discord.Interaction, current: str):
     try:
-        all_countries = await bot.get_country_names_cached()
-        cur = (current or "").lower().strip()
+        all_countries = await interaction.client.get_country_names_cached()
 
-        if not cur:
-            matches = all_countries[:25]
-        else:
-            matches = [n for n in all_countries if cur in n.lower()][:25]
+        if not all_countries:
+            return []
 
-        await interaction.response.autocomplete(
-            [app_commands.Choice(name=m, value=m) for m in matches]
-        )
-    except (NotFound, HTTPException):
-        # interaction expired or already responded — safe to ignore
-        return
-    except Exception:
+        return [
+            app_commands.Choice(name=c, value=c)
+            for c in all_countries
+            if current.lower() in c.lower()
+        ][:25]
+
+    except Exception as e:
         logger.exception("Autocomplete failed")
-        await interaction.response.autocomplete([])  # must respond with a list
-        return
+        return []  # ✅ ALWAYS return a list
+
 
 @bot.tree.command(
     name="help",
     description="Show all bot commands and Polandball art guidelines",
 )
 async def help_command(interaction: discord.Interaction):
-    if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True)
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
+    except discord.InteractionResponded:
+        pass
+
 
 
     # --- Commands section ---
