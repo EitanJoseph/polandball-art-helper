@@ -903,7 +903,7 @@ def build_character_embed(rec: "CountryRecord") -> discord.Embed:
 @app_commands.describe(character="Character name (leave blank to see all available)")
 async def available(interaction: discord.Interaction, character: Optional[str] = None):
     if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
 
     try:
         idx = bot._load_index()
@@ -1300,7 +1300,7 @@ class ArtistListView(discord.ui.View):
 @app_commands.describe(name="Artist name (full or partial)")
 async def artist(interaction: discord.Interaction, name: str):
     if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
 
 
     # Load records (reuse cache logic)
