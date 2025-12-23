@@ -61,11 +61,13 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
-
+import subprocess
+import shutil
 
 import discord
 from discord.ext import commands
 from discord import app_commands
+from discord.errors import NotFound, HTTPException
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -473,6 +475,9 @@ class PolandballBot(commands.Bot):
         super().__init__(command_prefix="/", intents=intents, help_command=None)
         self.sheet_client: Optional[SheetClient] = None
         self.cache = Cache(ttl=CACHE_TTL_SECS)
+        self._countries_cache: list[str] = []
+        self._countries_cache_ts: float = 0.0
+
         self._command_lock = False
         # NEW: Google Drive upload client
         self.drive_service = create_drive_service()
@@ -500,6 +505,17 @@ class PolandballBot(commands.Bot):
         else:
             records = cached
         return AvailabilityIndex.build(records)
+
+    async def get_country_names_cached(self) -> list[str]:
+        # return cached if fresh
+        if self._countries_cache and (time.time() - self._countries_cache_ts) < CACHE_TTL_SECS:
+            return self._countries_cache
+
+        # Refresh in a thread so autocomplete doesn't block the event loop
+        idx = await asyncio.to_thread(self._load_index)
+        self._countries_cache = idx.all_names
+        self._countries_cache_ts = time.time()
+        return self._countries_cache
 
 
 bot = PolandballBot()
@@ -886,7 +902,9 @@ def build_character_embed(rec: "CountryRecord") -> discord.Embed:
 @bot.tree.command(name="available", description="Check availability of characters or view all available characters")
 @app_commands.describe(character="Character name (leave blank to see all available)")
 async def available(interaction: discord.Interaction, character: Optional[str] = None):
-    await interaction.response.defer()
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+
     try:
         idx = bot._load_index()
     except Exception as e:
@@ -1281,7 +1299,9 @@ class ArtistListView(discord.ui.View):
 @bot.tree.command(name="artist", description="Search for all characters done by a given artist")
 @app_commands.describe(name="Artist name (full or partial)")
 async def artist(interaction: discord.Interaction, name: str):
-    await interaction.response.defer()
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+
 
     # Load records (reuse cache logic)
     try:
@@ -1474,19 +1494,20 @@ CATEGORY_CHOICES = ["Sprite", "Splash"]
 def convert_png_to_webp(png_path: str) -> str:
     webp_path = os.path.splitext(png_path)[0] + ".webp"
 
-    with Image.open(png_path) as im:
-        im.load()  # force decode now
+    cwebp = shutil.which("cwebp")
+    if not cwebp:
+        raise FileNotFoundError("cwebp not found in PATH. Restart the bot/terminal or add C:\\webp\\bin to PATH.")
 
-        # ✅ cap dimensions to keep memory/CPU predictable
-        MAX_DIM = 2048  # if you still hit limits, drop to 1536 or 1024
-        if im.width > MAX_DIM or im.height > MAX_DIM:
-            im.thumbnail((MAX_DIM, MAX_DIM), Image.LANCZOS)
+    subprocess.run(
+        [cwebp, png_path, "-q", "85", "-m", "4", "-o", webp_path],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
-        # convert after resize (cheaper)
-        if im.mode not in ("RGB", "RGBA"):
-            im = im.convert("RGBA")
-
-        im.save(webp_path, "WEBP", quality=90, method=6)
+    # Extra safety: ensure the output exists
+    if not os.path.exists(webp_path):
+        raise FileNotFoundError(f"WEBP output was not created: {webp_path}")
 
     return webp_path
 
@@ -1517,7 +1538,8 @@ async def submit_art(
     country: str,
     image: discord.Attachment,
 ):
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True, thinking=True)
     await interaction.followup.send(
         "Step 1/4: Validating submission…",
         ephemeral=True,
@@ -1644,39 +1666,34 @@ SPLASH_EXAMPLE_URL = "https://raw.githubusercontent.com/wwxiao09/polandball-art-
 
 
 @submit_art.autocomplete("country")
-async def submit_art_country_autocomplete(
-    interaction: discord.Interaction,
-    current: str,
-):
-    """
-    Autocomplete callback for the 'country' option.
-    Suggests country names from column B of the sheet.
-    """
+async def submit_art_country_autocomplete(interaction: discord.Interaction, current: str):
     try:
-        idx = bot._load_index()  # AvailabilityIndex
-        all_countries = idx.all_names  # already sorted list of names
-    except Exception as e:
-        logger.exception("Failed to load index for autocomplete: %s", e)
-        return []
+        all_countries = await bot.get_country_names_cached()
+        cur = (current or "").lower().strip()
 
-    current_lower = (current or "").lower()
-    if not current_lower:
-        # first open: show first 25 countries
-        matches = all_countries[:25]
-    else:
-        matches = [
-            name for name in all_countries
-            if current_lower in name.lower()
-        ][:25]
+        if not cur:
+            matches = all_countries[:25]
+        else:
+            matches = [n for n in all_countries if cur in n.lower()][:25]
 
-    return [app_commands.Choice(name=m, value=m) for m in matches]
+        await interaction.response.autocomplete(
+            [app_commands.Choice(name=m, value=m) for m in matches]
+        )
+    except (NotFound, HTTPException):
+        # interaction expired or already responded — safe to ignore
+        return
+    except Exception:
+        logger.exception("Autocomplete failed")
+        return
 
 @bot.tree.command(
     name="help",
     description="Show all bot commands and Polandball art guidelines",
 )
 async def help_command(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+
 
     # --- Commands section ---
     commands_text = (
