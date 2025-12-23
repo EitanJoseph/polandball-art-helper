@@ -1664,54 +1664,90 @@ async def help_command(interaction: discord.Interaction):
         "**/artist** `[name]`\n"
         "• Shows which characters a given artist has done (sprites & splashes)\n\n"
         "**/ping**\n"
-        "• Quick check that the bot is alive (replies with `pong`)"
+        "• Quick check that the bot is alive (replies with `pong`)\n\n"
+         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
-    # --- Sprite vs Splash section ---
-    art_types_text = (
-        "**Splash Art**\n"
-        "• Detailed illustrations, often with a background or extra elements\n"
-        "• Used in character screens\n"
-        "• Aspect ratio is flexible, but wide banners **(3:2 ratio)** work best\n"
-        "• Should primarily feature the main countryball, but you can include other balls as side characters if they don’t steal the spotlight\n"
-        "• Think of these as the “showcase” artworks!\n\n"
-        "**Sprite Art**\n"
-        "• Simpler, clean countryball designs **without backgrounds**\n"
-        "• Used as in-game characters\n"
-        "• Less detailed than splash art, since they’ll be shown smaller on screen (too much detail won’t be visible)\n"
-        "• Sprites will look best with a subtle bottom shadow to give each character a sense of grounding in-game\n"
-        "• These are the “playable” versions of the balls"
-    )
-
-    # --- Core Polandball drawing rules (short version) ---
-    polandball_rules_text = (
-        "• **No anti-aliasing** — must be pure pixel art (hard edges only)\n"
-        "• **No eyelashes, hair, limbs, pupils, or mouths**\n"
-        "• **No lines separating flag colours** — colours must touch directly\n"
-        "• **No circle, line, or shape tools of any kind**\n"
-        "• **Everything must be hand-drawn**\n"
-        "• **No AI-generated art**\n"
-        "• **No overly realistic or highly detailed art** (backgrounds are an exception)"
-    )
-
+    SPACER = "\u200b"
 
     embed = discord.Embed(
         title="Polandball Go Art Helper – Help",
         description=(
-            "Here’s how to use the bot and the basics of Polandball art style.\n"
+            "Here’s how to use the bot and how to contribute artwork to Polandball Go.\n"
             "You can submit either **Sprite Art**, **Splash Art**, or both."
         ),
         color=discord.Color.blurple(),
     )
-    embed.add_field(name="Commands", value=commands_text, inline=False)
-    embed.add_field(name="Sprite vs Splash", value=art_types_text, inline=False)
+    embed.add_field(name="**Commands**", value=commands_text, inline=False)
+
+    # embed.add_field(name=SPACER, value=" ", inline=False)
+
     embed.add_field(
-        name="Polandball Art Rules (Short Version)",
-        value=polandball_rules_text,
+        name="🖌️ **Art Rules (Applies to ALL Art)**",
+        value=(
+            "• No eyelashes, hair, limbs, pupils, or mouths\n"
+            "• No lines separating the flag colors\n"
+            "• No circle, line, or shape tools of any kind\n"
+            "• Everything must be hand-drawn\n"
+            "⚠️ **Art that does not follow these rules may not be accepted.**\n\n"
+             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        ),
         inline=False,
     )
+
+    # embed.add_field(name=SPACER, value=" ", inline=False)
+
     embed.add_field(
-        name="📩 Support",
+        name="**1) Splash Art (Example Below)**",
+        value=(
+            "• Detailed illustrations, often with backgrounds or extra elements\n"
+            "• Used in character screens\n"
+            "• **Aspect ratio:** 3:2\n"
+            "• Should primarily feature the main countryball\n"
+            "• Other balls may appear as side characters\n"
+            "• Avoid placing the main ball too close to the canvas edges\n\n"
+             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        ),
+        inline=False,
+    )
+
+    # embed.add_field(name=SPACER, value=" ", inline=False)
+
+    embed.add_field(
+        name="**2) Sprite Art (Example Below)**",
+        value=(
+            "• Simple, clean designs with no background\n"
+            "• Less detailed than splash art (appears smaller in-game)\n"
+            "• Too much detail may not be visible\n"
+            "• **Aspect ratio:** 1:1\n"
+            "• **Recommended canvas size:** 2500 × 2500\n"
+            "• Sprite size should be proportional to the country\n"
+            "  (e.g. San Marino smaller than the USA)\n"
+            "• A subtle bottom shadow is **required**\n\n"
+             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        ),
+        inline=False,
+    )
+
+    # embed.add_field(name=SPACER, value=" ", inline=False)
+
+    embed.add_field(
+        name="📌 **Submitting Rules**",
+        value=(
+            "• Anyone may submit art for any country at any time\n"
+            "• This includes countries that are already in-game\n"
+            "• PBGO supports alternate character forms\n"
+            "• Your submission may be used as an alternate form\n"
+            "• **Submitting art does not guarantee it will be added to the game**\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        ),
+        inline=False,
+    )
+
+    # embed.add_field(name=SPACER, value=" ", inline=False)
+
+    embed.add_field(
+        name="📩 **Support**",
         value="Contact <@1091755544177557626> for any bot-related questions.",
         inline=False,
     )
