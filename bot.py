@@ -1503,7 +1503,7 @@ def convert_png_to_webp(png_path: str) -> str:
     webp_path = os.path.splitext(png_path)[0] + ".webp"
 
     # -q quality (0-100); -m method (0-6) tradeoff speed/size
-    cmd = ["cwebp", png_path, "-lossless", "-m", "4", "-o", webp_path]
+    cmd = ["cwebp", png_path, "-lossless", "-m", "2", "-o", webp_path]
 
     # capture_output=True so we can surface errors in logs if cwebp fails
     p = subprocess.run(cmd, check=True, capture_output=True, text=True)
