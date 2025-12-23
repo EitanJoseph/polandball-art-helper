@@ -61,8 +61,6 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
-import subprocess
-import shutil
 
 import discord
 from discord.ext import commands
@@ -1491,88 +1489,6 @@ async def run_blocking(fn, *args, timeout: int = 60, **kwargs):
 
 CATEGORY_CHOICES = ["Sprite", "Splash"]
 
-async def background_convert_and_upload_webp(
-    *,
-    service,
-    png_path: str,
-    category: str,
-    country: str,
-    discord_username: str,
-    artist_name: str,
-):
-    """
-    Background task: convert PNG -> lossless WEBP and upload to Drive.
-    This runs AFTER the user already received success.
-    """
-    webp_path: Optional[str] = None
-    try:
-        # Convert PNG -> WEBP (CPU-bound, off event loop)
-        webp_path = await asyncio.to_thread(convert_png_to_webp, png_path)
-
-        # Upload WEBP
-        await run_blocking(
-            upload_art_to_drive,
-            service,
-            webp_path,
-            category=category,
-            country=country,
-            discord_username=discord_username,
-            artist_name=artist_name,
-            timeout=180,
-        )
-
-        logger.info("Background WEBP upload completed for %s", country)
-
-    except Exception:
-        logger.exception("Background WEBP conversion/upload failed")
-
-    finally:
-        # Clean up temp files
-        for p in (png_path, webp_path):
-            if p and os.path.exists(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
-
-
-def convert_png_to_webp(png_path: str) -> str:
-    webp_path = os.path.splitext(png_path)[0] + ".webp"
-
-    import shutil
-    cwebp = shutil.which("cwebp") or "cwebp"
-
-    cmd = [cwebp, png_path, "-lossless", "-m", "2", "-mt", "-o", webp_path]
-
-    t0 = time.time()
-    try:
-        subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=180,  # prevent infinite hangs
-        )
-
-    except subprocess.TimeoutExpired as e:
-        raise TimeoutError(f"cwebp timed out after 180s. cmd={cmd}") from e
-
-    except subprocess.CalledProcessError as e:
-        # ✅ THIS is the missing piece: you need stderr to know why it failed
-        raise RuntimeError(
-            "cwebp failed.\n"
-            f"code={e.returncode}\n"
-            f"cmd={cmd}\n"
-            f"stdout={e.stdout}\n"
-            f"stderr={e.stderr}\n"
-        ) from e
-
-    dur = time.time() - t0
-    print(f"[cwebp] done in {dur:.1f}s, output={webp_path}")
-    return webp_path
-
-
-
 def get_custom_emoji(bot: commands.Bot, emoji_name: str) -> str:
     """
     Returns the Discord representation of a custom emoji by name.
@@ -1644,58 +1560,48 @@ async def submit_art(
             )
             return
 
-        # 3) Use system temp directory (cross-platform)
-        webp_path: Optional[str] = None
+        tmp_path = os.path.join(tempfile.gettempdir(), f"polandball_{uuid.uuid4()}{ext}")
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = os.path.join(tempfile.gettempdir(), f"polandball_{uuid.uuid4()}{ext}")
+        await image.save(tmp_path)
 
-            await image.save(tmp_path)
+        service = interaction.client.drive_service
+        discord_username = interaction.user.name
 
-            service = interaction.client.drive_service
-            discord_username = interaction.user.name
+        await interaction.followup.send(
+            "Step 2/3: Uploading PNG to Google Drive…",
+            ephemeral=True,
+        )
 
-            await interaction.followup.send(
-                "Step 2/3: Uploading PNG to Google Drive…",
-                ephemeral=True,
-            )
+        drive_file_png, drive_path_png = await run_blocking(
+            upload_art_to_drive,
+            service,
+            tmp_path,
+            category=category.value,
+            country=country,
+            discord_username=discord_username,
+            artist_name=artist_name,
+            timeout=120,
+        )
 
-            drive_file_png, drive_path_png = await run_blocking(
-                upload_art_to_drive,
-                service,
-                tmp_path,
-                category=category.value,
-                country=country,
-                discord_username=discord_username,
-                artist_name=artist_name,
-                timeout=120,
-            )
+        await interaction.followup.send(
+            "Step 3/3: Finalizing Submission...",
+            ephemeral=True,
+        )
 
-            await interaction.followup.send(
-                "Step 3/3: Finalizing Submission...",
-                ephemeral=True,
-            )
+        fire_emoji = get_custom_emoji(bot, "PoleonFire")
+        await interaction.followup.send(
+            "✅ **Submission received!**\n\n"
+            "Your art has been uploaded successfully.\n"
+            f"You'll be contacted if any changes are needed. Thank you for helping bring Polandball Go to life! {fire_emoji}",
+            ephemeral=True,
+        )
+            
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
-            fire_emoji = get_custom_emoji(bot, "PoleonFire")
-            await interaction.followup.send(
-                "✅ **Submission received!**\n\n"
-                "Your art has been uploaded successfully.\n"
-                f"You'll be contacted if any changes are needed. Thank you for helping bring Polandball Go to life! {fire_emoji}",
-                ephemeral=True,
-            )
-
-            asyncio.create_task(
-                background_convert_and_upload_webp(
-                    service=service,
-                    png_path=tmp_path,
-                    category=category.value,
-                    country=country,
-                    discord_username=discord_username,
-                    artist_name=artist_name,
-                )
-            )
-
-            return
+        return
 
 
     except Exception as e:
@@ -1733,6 +1639,7 @@ async def submit_art_country_autocomplete(interaction: discord.Interaction, curr
         return
     except Exception:
         logger.exception("Autocomplete failed")
+        await interaction.response.autocomplete([])  # must respond with a list
         return
 
 @bot.tree.command(
