@@ -1491,23 +1491,86 @@ async def run_blocking(fn, *args, timeout: int = 60, **kwargs):
 
 CATEGORY_CHOICES = ["Sprite", "Splash"]
 
+async def background_convert_and_upload_webp(
+    *,
+    service,
+    png_path: str,
+    category: str,
+    country: str,
+    discord_username: str,
+    artist_name: str,
+):
+    """
+    Background task: convert PNG -> lossless WEBP and upload to Drive.
+    This runs AFTER the user already received success.
+    """
+    webp_path: Optional[str] = None
+    try:
+        # Convert PNG -> WEBP (CPU-bound, off event loop)
+        webp_path = await asyncio.to_thread(convert_png_to_webp, png_path)
+
+        # Upload WEBP
+        await run_blocking(
+            upload_art_to_drive,
+            service,
+            webp_path,
+            category=category,
+            country=country,
+            discord_username=discord_username,
+            artist_name=artist_name,
+            timeout=180,
+        )
+
+        logger.info("Background WEBP upload completed for %s", country)
+
+    except Exception:
+        logger.exception("Background WEBP conversion/upload failed")
+
+    finally:
+        # Clean up temp files
+        for p in (png_path, webp_path):
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
 def convert_png_to_webp(png_path: str) -> str:
-    """
-    Convert a PNG to WEBP using the system `cwebp` binary (faster than Pillow on Cloud Run).
-    Requires `cwebp` installed in the container/host.
-    """
-    with Image.open(png_path) as im:
-        if im.width * im.height > 4096 * 4096:
-            raise ValueError("Image dimensions too large for processing.")
-    
     webp_path = os.path.splitext(png_path)[0] + ".webp"
 
-    # -q quality (0-100); -m method (0-6) tradeoff speed/size
-    cmd = ["cwebp", png_path, "-lossless", "-m", "2", "-o", webp_path]
+    import shutil
+    cwebp = shutil.which("cwebp") or "cwebp"
 
-    # capture_output=True so we can surface errors in logs if cwebp fails
-    p = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    cmd = [cwebp, png_path, "-lossless", "-m", "2", "-mt", "-o", webp_path]
+
+    t0 = time.time()
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=180,  # prevent infinite hangs
+        )
+
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(f"cwebp timed out after 180s. cmd={cmd}") from e
+
+    except subprocess.CalledProcessError as e:
+        # ✅ THIS is the missing piece: you need stderr to know why it failed
+        raise RuntimeError(
+            "cwebp failed.\n"
+            f"code={e.returncode}\n"
+            f"cmd={cmd}\n"
+            f"stdout={e.stdout}\n"
+            f"stderr={e.stderr}\n"
+        ) from e
+
+    dur = time.time() - t0
+    print(f"[cwebp] done in {dur:.1f}s, output={webp_path}")
     return webp_path
+
 
 
 def get_custom_emoji(bot: commands.Bot, emoji_name: str) -> str:
@@ -1539,7 +1602,7 @@ async def submit_art(
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=True, thinking=True)
     await interaction.followup.send(
-        "Step 1/4: Validating submission…",
+        "Step 1/3: Validating submission…",
         ephemeral=True,
     )
 
@@ -1549,10 +1612,6 @@ async def submit_art(
         # --- 1) Enforce country must be from spreadsheet ---
         try:
             idx = await run_blocking(bot._load_index, timeout=30)  # AvailabilityIndex built from your sheet
-            await interaction.followup.send(
-                "Step 2/4: Converting image…",
-                ephemeral=True,
-            )
             valid_countries = set(idx.all_names)
         except Exception as e:
             logger.exception("Failed to load index for submit_art: %s", e)
@@ -1589,23 +1648,18 @@ async def submit_art(
         webp_path: Optional[str] = None
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4()}{ext}")
+            tmp_path = os.path.join(tempfile.gettempdir(), f"polandball_{uuid.uuid4()}{ext}")
 
-            # Save Discord attachment to temp file
             await image.save(tmp_path)
 
-            # 4) Upload to Drive: Country / [Sprite|Splash] / discordUser.artist.country.png
             service = interaction.client.drive_service
-            discord_username = interaction.user.name  # or .display_name if you want
-
-            # Convert PNG → WEBP (blocking) off the event loop
-            webp_path = await asyncio.to_thread(convert_png_to_webp, tmp_path)
+            discord_username = interaction.user.name
 
             await interaction.followup.send(
-                    "Step 3/4: Uploading files to Google Drive…",
-                    ephemeral=True,
-                )
-            # Upload PNG (blocking) off the event loop
+                "Step 2/3: Uploading PNG to Google Drive…",
+                ephemeral=True,
+            )
+
             drive_file_png, drive_path_png = await run_blocking(
                 upload_art_to_drive,
                 service,
@@ -1617,35 +1671,32 @@ async def submit_art(
                 timeout=120,
             )
 
-            # Upload WEBP (blocking) off the event loop
-            drive_file_webp, drive_path_webp = await run_blocking(
-                upload_art_to_drive,
-                service,
-                webp_path,
-                category=category.value,
-                country=country,
-                discord_username=discord_username,
-                artist_name=artist_name,
-                timeout=120,
+            await interaction.followup.send(
+                "Step 3/3: Finalizing Submission...",
+                ephemeral=True,
             )
 
-        view_link_png = drive_file_png.get("webViewLink", "")
-        view_link_webp = drive_file_webp.get("webViewLink", "")
+            fire_emoji = get_custom_emoji(bot, "PoleonFire")
+            await interaction.followup.send(
+                "✅ **Submission received!**\n\n"
+                "Your art has been uploaded successfully.\n"
+                f"You'll be contacted if any changes are needed. Thank you for helping bring Polandball Go to life! {fire_emoji}",
+                ephemeral=True,
+            )
 
-        await interaction.followup.send(
-            "Step 4/4: Finalizing submission…",
-            ephemeral=True,
-        )
-        fire_emoji = get_custom_emoji(bot, "PoleonFire")
-        await interaction.followup.send(
-            "✅ **Submission received!**\n\n"
-            "Your art has been successfully submitted.\n"
-            f"You'll be contacted if any changes are needed. Thank you for helping bring Polandball Go to life! {fire_emoji}",
+            asyncio.create_task(
+                background_convert_and_upload_webp(
+                    service=service,
+                    png_path=tmp_path,
+                    category=category.value,
+                    country=country,
+                    discord_username=discord_username,
+                    artist_name=artist_name,
+                )
+            )
 
-            # f"**PNG:** {drive_path_png}\n{view_link_png}\n\n"
-            # f"**WEBP:** {drive_path_webp}\n{view_link_webp}",
-            ephemeral=True,
-        )
+            return
+
 
     except Exception as e:
         import traceback
