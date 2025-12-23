@@ -9,8 +9,11 @@ WORKDIR /app
 
 # System deps (optional but useful for SSL/certs & locales)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates tzdata \
+    ca-certificates tzdata webp \
  && rm -rf /var/lib/apt/lists/*
+
+
+RUN cwebp -version
 
 # Copy only requirements first (better Docker layer caching)
 COPY requirements.txt .
