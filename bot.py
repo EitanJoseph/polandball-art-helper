@@ -1492,23 +1492,21 @@ async def run_blocking(fn, *args, timeout: int = 60, **kwargs):
 CATEGORY_CHOICES = ["Sprite", "Splash"]
 
 def convert_png_to_webp(png_path: str) -> str:
+    """
+    Convert a PNG to WEBP using the system `cwebp` binary (faster than Pillow on Cloud Run).
+    Requires `cwebp` installed in the container/host.
+    """
+    with Image.open(png_path) as im:
+        if im.width * im.height > 4096 * 4096:
+            raise ValueError("Image dimensions too large for processing.")
+    
     webp_path = os.path.splitext(png_path)[0] + ".webp"
 
-    cwebp = shutil.which("cwebp")
-    if not cwebp:
-        raise FileNotFoundError("cwebp not found in PATH. Restart the bot/terminal or add C:\\webp\\bin to PATH.")
+    # -q quality (0-100); -m method (0-6) tradeoff speed/size
+    cmd = ["cwebp", png_path, "-q", "85", "-m", "4", "-o", webp_path]
 
-    subprocess.run(
-        [cwebp, png_path, "-q", "85", "-m", "4", "-o", webp_path],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    # Extra safety: ensure the output exists
-    if not os.path.exists(webp_path):
-        raise FileNotFoundError(f"WEBP output was not created: {webp_path}")
-
+    # capture_output=True so we can surface errors in logs if cwebp fails
+    p = subprocess.run(cmd, check=True, capture_output=True, text=True)
     return webp_path
 
 
@@ -1601,7 +1599,7 @@ async def submit_art(
             discord_username = interaction.user.name  # or .display_name if you want
 
             # Convert PNG → WEBP (blocking) off the event loop
-            webp_path = await run_blocking(convert_png_to_webp, tmp_path, timeout=120)
+            webp_path = await asyncio.to_thread(convert_png_to_webp, tmp_path)
 
             await interaction.followup.send(
                     "Step 3/4: Uploading files to Google Drive…",
