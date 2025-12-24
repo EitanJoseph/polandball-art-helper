@@ -79,6 +79,7 @@ import random
 
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from googleapiclient.errors import HttpError
 
 from PIL import Image
 Image.MAX_IMAGE_PIXELS = 12_000_000  # ~12MP safety cap to prevent memory spikes
@@ -292,6 +293,24 @@ def normalize_country(text: str) -> str:
     words = [w for w in words if w not in _STOPWORDS]
     return " ".join(words)
 
+def drive_execute_with_retry(request, *, retries: int = 5, base_delay: float = 0.7):
+    """
+    Execute a googleapiclient request with exponential backoff retries for transient errors.
+    Retries on 500/503/504 and rate-limit 429.
+    """
+    for attempt in range(retries):
+        try:
+            return request.execute()
+        except HttpError as e:
+            status = getattr(e.resp, "status", None)
+            # transient / retryable statuses
+            if status in (429, 500, 503, 504):
+                # exponential backoff + jitter
+                sleep_s = base_delay * (2 ** attempt) + random.uniform(0, 0.25)
+                time.sleep(min(sleep_s, 8))
+                continue
+            raise
+
 def create_drive_service():
     """
     Create a Google Drive API client using the same credential logic as SheetClient,
@@ -327,14 +346,17 @@ def get_or_create_folder(service, name: str, parent_id: Optional[str] = None) ->
             f"and name='{name}' and trashed=false"
         )
 
-    result = service.files().list(
-        q=q,
-        spaces="drive",
-        fields="files(id, name)",
-        pageSize=1,
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-    ).execute()
+    result = drive_execute_with_retry(
+        service.files().list(
+            q=q,
+            spaces="drive",
+            fields="files(id, name)",
+            pageSize=1,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        )
+    )
+
 
     files = result.get("files", [])
     if files:
@@ -347,11 +369,14 @@ def get_or_create_folder(service, name: str, parent_id: Optional[str] = None) ->
     if parent_id:
         metadata["parents"] = [parent_id]
 
-    folder = service.files().create(
-        body=metadata,
-        fields="id",
-        supportsAllDrives=True,
-    ).execute()
+    folder = drive_execute_with_retry(
+        service.files().create(
+            body=metadata,
+            fields="id",
+            supportsAllDrives=True,
+        )
+    )
+
     return folder["id"]
 
 def sanitize_for_filename(value: str) -> str:
@@ -410,12 +435,15 @@ def upload_art_to_drive(
 
     media = MediaFileUpload(local_path, mimetype="image/png", resumable=True)
 
-    drive_file = service.files().create(
-        body=metadata,
-        media_body=media,
-        fields="id, webViewLink, webContentLink",
-        supportsAllDrives=True,
-    ).execute()
+    drive_file = drive_execute_with_retry(
+        service.files().create(
+            body=metadata,
+            media_body=media,
+            fields="id, webViewLink, webContentLink",
+            supportsAllDrives=True,
+        )
+    )
+
 
     drive_path = f"{country}/{category}/{drive_filename}"
     return drive_file, drive_path
