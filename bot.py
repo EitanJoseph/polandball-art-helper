@@ -81,6 +81,8 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
+from datetime import datetime, timezone
+
 from PIL import Image
 Image.MAX_IMAGE_PIXELS = 12_000_000  # ~12MP safety cap to prevent memory spikes
 
@@ -424,7 +426,8 @@ def upload_art_to_drive(
     _, ext = os.path.splitext(local_path)
     ext = ext.lower()
 
-    base_name = f"{discord_username}.{artist_name}.{country}"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    base_name = f"{discord_username}.{artist_name}.{country}.{timestamp}"
     safe_base = sanitize_for_filename(base_name)
     drive_filename = f"{safe_base}{ext}"
 
