@@ -487,13 +487,20 @@ class PolandballBot(commands.Bot):
         logger.info("Logged in as %s (id=%s)", self.user, self.user.id)
         try:
             synced = await self.tree.sync()
-            logger.info(
-                "Synced %d command(s): %s",
-                len(synced),
-                [c.name for c in synced],
-            )
+            logger.info("Synced %d command(s): %s", len(synced), [c.name for c in synced])
         except Exception as e:
             logger.exception("Failed to sync commands: %s", e)
+
+        # ✅ ADD THIS: warm up sheet/cache for autocomplete
+        async def _warm():
+            try:
+                await self.get_country_names_cached()
+                logger.info("Warmed country cache for autocomplete.")
+            except Exception:
+                logger.exception("Failed to warm country cache")
+
+        asyncio.create_task(_warm())
+
 
 
     def _load_index(self) -> AvailabilityIndex:
@@ -1530,7 +1537,7 @@ async def submit_art(
     image: discord.Attachment,
 ):
     if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=True)
     await interaction.followup.send(
         "Step 1/3: Validating submission…",
         ephemeral=True,
@@ -1640,9 +1647,12 @@ SPLASH_EXAMPLE_URL = "https://raw.githubusercontent.com/wwxiao09/polandball-art-
 @submit_art.autocomplete("country")
 async def submit_art_country_autocomplete(interaction: discord.Interaction, current: str):
     try:
-        all_countries = await interaction.client.get_country_names_cached()
-
-        if not all_countries:
+        # ✅ FAST PATH: if cache already exists, use it immediately
+        if interaction.client._countries_cache:
+            all_countries = interaction.client._countries_cache
+        else:
+            # kick off warmup but don't block autocomplete
+            asyncio.create_task(interaction.client.get_country_names_cached())
             return []
 
         return [
@@ -1650,10 +1660,9 @@ async def submit_art_country_autocomplete(interaction: discord.Interaction, curr
             for c in all_countries
             if current.lower() in c.lower()
         ][:25]
-
-    except Exception as e:
+    except Exception:
         logger.exception("Autocomplete failed")
-        return []  # ✅ ALWAYS return a list
+        return []
 
 
 @bot.tree.command(
@@ -1666,7 +1675,6 @@ async def help_command(interaction: discord.Interaction):
             await interaction.response.defer(ephemeral=True, thinking=True)
     except discord.InteractionResponded:
         pass
-
 
 
     # --- Commands section ---
