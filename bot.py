@@ -77,6 +77,8 @@ import uuid
 import errno
 import random
 
+import functools
+
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
@@ -436,7 +438,7 @@ def upload_art_to_drive(
         "parents": [category_folder_id],
     }
 
-    media = MediaFileUpload(local_path, mimetype="image/png", resumable=True)
+    media = MediaFileUpload(local_path, mimetype="image/png", resumable=False)
 
     drive_file = drive_execute_with_retry(
         service.files().create(
@@ -1625,16 +1627,19 @@ async def submit_art(
         )
 
         try:
-            _, _ = await retry_run_blocking(lambda: run_blocking(
-                upload_art_to_drive,
-                service,
-                tmp_path,
-                category=category.value,
-                country=country,
-                discord_username=discord_username,
-                artist_name=artist_name,
-                timeout=180,
-            ))
+            async def do_upload():
+                return await run_blocking(
+                    upload_art_to_drive,
+                    service,
+                    tmp_path,
+                    category=category.value,
+                    country=country,
+                    discord_username=discord_username,
+                    artist_name=artist_name,
+                    timeout=180,
+                )
+
+            drive_file, drive_path = await retry_run_blocking(do_upload)
 
             await interaction.followup.send(
                 "Step 3/3: Finalizing Submission...",
