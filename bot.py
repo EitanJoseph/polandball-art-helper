@@ -534,7 +534,56 @@ class PolandballBot(commands.Bot):
 
         asyncio.create_task(_warm())
 
+    async def setup_hook(self):
+        """Setup hook to register error handlers"""
+        self.tree.error(self.on_app_command_error)
 
+    async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        """Global error handler for app commands"""
+        # Log the error
+        logger.error(
+            "Command '%s' raised an error for user %s: %s",
+            interaction.command.name if interaction.command else "unknown",
+            interaction.user,
+            error,
+            exc_info=error
+        )
+
+        # Handle specific error types
+        if isinstance(error, app_commands.CommandInvokeError):
+            original = error.original
+
+            # Handle Discord API errors
+            if isinstance(original, discord.errors.NotFound):
+                if original.code == 10062:  # Unknown interaction
+                    logger.warning(
+                        "Interaction expired (>3s) for command '%s' by user %s",
+                        interaction.command.name if interaction.command else "unknown",
+                        interaction.user
+                    )
+                    # Can't respond - interaction is already expired
+                    return
+
+            elif isinstance(original, discord.errors.HTTPException):
+                if original.code == 40060:  # Interaction already acknowledged
+                    logger.warning(
+                        "Interaction already acknowledged for command '%s' by user %s",
+                        interaction.command.name if interaction.command else "unknown",
+                        interaction.user
+                    )
+                    # Can't respond - already acknowledged
+                    return
+
+        # Try to send an error message to the user if possible
+        try:
+            error_message = "An error occurred while processing your command. Please try again."
+
+            if not interaction.response.is_done():
+                await interaction.response.send_message(error_message, ephemeral=True)
+            else:
+                await interaction.followup.send(error_message, ephemeral=True)
+        except Exception as e:
+            logger.error("Failed to send error message to user: %s", e)
 
     def _load_index(self) -> AvailabilityIndex:
         cached = self.cache.get()
@@ -1061,7 +1110,13 @@ def ready_icon(label: str) -> str:
 
 @bot.tree.command(name="ping", description="Ping the bot")
 async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message("pong")
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message("pong")
+        else:
+            await interaction.followup.send("pong")
+    except (discord.errors.NotFound, discord.errors.HTTPException) as e:
+        logger.warning("Failed to respond to ping command: %s", e)
 
 
 class ArtType(Enum):
