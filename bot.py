@@ -992,8 +992,12 @@ def build_character_embed(rec: "CountryRecord") -> discord.Embed:
 @bot.tree.command(name="available", description="Check availability of characters or view all available characters")
 @app_commands.describe(character="Character name (leave blank to see all available)")
 async def available(interaction: discord.Interaction, character: Optional[str] = None):
-    if not interaction.response.is_done():
+    # CRITICAL: Defer immediately to avoid 3-second timeout
+    try:
         await interaction.response.defer()
+    except (discord.errors.NotFound, discord.errors.HTTPException) as e:
+        logger.warning("Failed to defer available command (timeout): %s", e)
+        return
 
     try:
         idx = bot._load_index()
@@ -1110,13 +1114,19 @@ def ready_icon(label: str) -> str:
 
 @bot.tree.command(name="ping", description="Ping the bot")
 async def ping(interaction: discord.Interaction):
+    # CRITICAL: Respond immediately to avoid 3-second timeout
     try:
-        if not interaction.response.is_done():
-            await interaction.response.send_message("pong")
+        await interaction.response.send_message("pong")
+    except discord.errors.NotFound as e:
+        if e.code == 10062:
+            logger.warning("Ping command timed out (>3s)")
         else:
-            await interaction.followup.send("pong")
-    except (discord.errors.NotFound, discord.errors.HTTPException) as e:
-        logger.warning("Failed to respond to ping command: %s", e)
+            raise
+    except discord.errors.HTTPException as e:
+        if e.code == 40060:
+            logger.warning("Ping interaction already acknowledged")
+        else:
+            raise
 
 
 class ArtType(Enum):
@@ -1395,9 +1405,12 @@ class ArtistListView(discord.ui.View):
 @bot.tree.command(name="artist", description="Search for all characters done by a given artist")
 @app_commands.describe(name="Artist name (full or partial)")
 async def artist(interaction: discord.Interaction, name: str):
-    if not interaction.response.is_done():
+    # CRITICAL: Defer immediately to avoid 3-second timeout
+    try:
         await interaction.response.defer()
-
+    except (discord.errors.NotFound, discord.errors.HTTPException) as e:
+        logger.warning("Failed to defer artist command (timeout): %s", e)
+        return
 
     # Load records (reuse cache logic)
     try:
@@ -1624,8 +1637,13 @@ async def submit_art(
     country: str,
     image: discord.Attachment,
 ):
-    if not interaction.response.is_done():
+    # CRITICAL: Defer immediately to avoid 3-second timeout
+    try:
         await interaction.response.defer(ephemeral=True)
+    except (discord.errors.NotFound, discord.errors.HTTPException) as e:
+        logger.warning("Failed to defer submit command (timeout): %s", e)
+        return
+
     await interaction.followup.send(
         "Step 1/3: Validating submission…",
         ephemeral=True,
@@ -1761,9 +1779,12 @@ async def submit_art_country_autocomplete(interaction: discord.Interaction, curr
     description="Show all bot commands and Polandball art guidelines",
 )
 async def help_command(interaction: discord.Interaction):
+    # CRITICAL: Defer immediately to avoid 3-second timeout
     try:
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+    except (discord.errors.NotFound, discord.errors.HTTPException) as e:
+        logger.warning("Failed to defer help command (timeout): %s", e)
+        return
     except discord.InteractionResponded:
         pass
 
