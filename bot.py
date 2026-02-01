@@ -992,12 +992,8 @@ def build_character_embed(rec: "CountryRecord") -> discord.Embed:
 @bot.tree.command(name="available", description="Check availability of characters or view all available characters")
 @app_commands.describe(character="Character name (leave blank to see all available)")
 async def available(interaction: discord.Interaction, character: Optional[str] = None):
-    # CRITICAL: Defer immediately to avoid 3-second timeout
-    try:
+    if not interaction.response.is_done():
         await interaction.response.defer()
-    except (discord.errors.NotFound, discord.errors.HTTPException) as e:
-        logger.warning("Failed to defer available command (timeout): %s", e)
-        return
 
     try:
         idx = bot._load_index()
@@ -1114,19 +1110,13 @@ def ready_icon(label: str) -> str:
 
 @bot.tree.command(name="ping", description="Ping the bot")
 async def ping(interaction: discord.Interaction):
-    # CRITICAL: Respond immediately to avoid 3-second timeout
     try:
-        await interaction.response.send_message("pong")
-    except discord.errors.NotFound as e:
-        if e.code == 10062:
-            logger.warning("Ping command timed out (>3s)")
+        if not interaction.response.is_done():
+            await interaction.response.send_message("pong")
         else:
-            raise
-    except discord.errors.HTTPException as e:
-        if e.code == 40060:
-            logger.warning("Ping interaction already acknowledged")
-        else:
-            raise
+            await interaction.followup.send("pong")
+    except (discord.errors.NotFound, discord.errors.HTTPException) as e:
+        logger.warning("Failed to respond to ping command: %s", e)
 
 
 class ArtType(Enum):
@@ -1405,12 +1395,9 @@ class ArtistListView(discord.ui.View):
 @bot.tree.command(name="artist", description="Search for all characters done by a given artist")
 @app_commands.describe(name="Artist name (full or partial)")
 async def artist(interaction: discord.Interaction, name: str):
-    # CRITICAL: Defer immediately to avoid 3-second timeout
-    try:
+    if not interaction.response.is_done():
         await interaction.response.defer()
-    except (discord.errors.NotFound, discord.errors.HTTPException) as e:
-        logger.warning("Failed to defer artist command (timeout): %s", e)
-        return
+
 
     # Load records (reuse cache logic)
     try:
@@ -1620,132 +1607,126 @@ async def retry_run_blocking(callable_fn, attempts: int = 3, base_delay: float =
             await asyncio.sleep(base_delay * (2 ** i) + random.random())
     raise last_exc
 
-# DISABLED: Submit command temporarily disabled
-# @bot.tree.command(name="submit", description="Submit art")
-# @app_commands.describe(
-#     category="Art category (Sprite or Splash)",
-#     artist_name="Folder artist name (as you want it to appear)",
-#     country="Country / character name (from the game list)",
-#     image="Attach your art file (PNG only)",
-# )
-# @app_commands.choices(
-#     category=[app_commands.Choice(name=c, value=c) for c in CATEGORY_CHOICES]
-# )
-# async def submit_art(
-#     interaction: discord.Interaction,
-#     category: app_commands.Choice[str],
-#     artist_name: str,
-#     country: str,
-#     image: discord.Attachment,
-# ):
-#     # CRITICAL: Defer immediately to avoid 3-second timeout
-#     try:
-#         await interaction.response.defer(ephemeral=True)
-#     except (discord.errors.NotFound, discord.errors.HTTPException) as e:
-#         logger.warning("Failed to defer submit command (timeout): %s", e)
-#         return
-#
-#     await interaction.followup.send(
-#         "Step 1/3: Validating submission…",
-#         ephemeral=True,
-#     )
-#
-#     tmp_path: Optional[str] = None
-#
-#     try:
-#         # --- 1) Enforce country must be from spreadsheet ---
-#         try:
-#             idx = await run_blocking(bot._load_index, timeout=30)  # AvailabilityIndex built from your sheet
-#             valid_countries = set(idx.all_names)
-#         except Exception as e:
-#             logger.exception("Failed to load index for submit_art: %s", e)
-#             await interaction.followup.send(
-#                 "❌ I couldn't load the country list from the sheet. Please try again later.",
-#                 ephemeral=True,
-#             )
-#             return
-#
-#         if country not in valid_countries:
-#             await interaction.followup.send(
-#                 f"❌ `{country}` is not a valid country in the game list.\n"
-#                 "Please choose a country from the autocomplete suggestions.",
-#                 ephemeral=True,
-#             )
-#             return
-#
-#         # --- 2) Enforce PNG only ---
-#         filename = image.filename or ""
-#         _, ext = os.path.splitext(filename)
-#         ext = ext.lower()
-#
-#         # Optionally also check content_type: image.content_type == "image/png"
-#         if ext != ".png":
-#             await interaction.followup.send(
-#                 "❌ Only **PNG** files are allowed.\n"
-#                 f"You uploaded `{filename}`.\n"
-#                 "Please export your art as a `.png` file and try again.",
-#                 ephemeral=True,
-#             )
-#             return
-#
-#         tmp_path = os.path.join(tempfile.gettempdir(), f"polandball_{uuid.uuid4()}{ext}")
-#
-#         await image.save(tmp_path)
-#
-#         service = interaction.client.drive_service
-#         discord_username = interaction.user.name
-#
-#         await interaction.followup.send(
-#             "Step 2/3: Uploading PNG to Google Drive…",
-#             ephemeral=True,
-#         )
-#
-#         try:
-#             async def do_upload():
-#                 return await run_blocking(
-#                     upload_art_to_drive,
-#                     service,
-#                     tmp_path,
-#                     category=category.value,
-#                     country=country,
-#                     discord_username=discord_username,
-#                     artist_name=artist_name,
-#                     timeout=180,
-#                 )
-#
-#             drive_file, drive_path = await retry_run_blocking(do_upload)
-#
-#             await interaction.followup.send(
-#                 "Step 3/3: Finalizing Submission...",
-#                 ephemeral=True,
-#             )
-#
-#             fire_emoji = get_custom_emoji(bot, "PoleonFire")
-#             await interaction.followup.send(
-#                 "✅ **Submission received!**\n\n"
-#                 "Your art has been uploaded successfully.\n"
-#                 f"You'll be contacted if any changes are needed. Thank you for helping bring Polandball Go to life! {fire_emoji}",
-#                 ephemeral=True,
-#             )
-#             return
-#
-#         finally:
-#             if tmp_path:
-#                 try:
-#                     os.remove(tmp_path)
-#                 except OSError:
-#                     pass
-#
-#
-#
-#     except Exception as e:
-#         import traceback
-#         traceback.print_exc()  # shows full error in your bot logs/console
-#
-#         await interaction.followup.send(
-#             f"❌ Something went wrong while uploading your art:\n`{type(e).__name__}: {str(e) or repr(e)}`",
-#             ephemeral=True,
-#         )
+@bot.tree.command(name="submit", description="Submit art")
+@app_commands.describe(
+    category="Art category (Sprite or Splash)",
+    artist_name="Folder artist name (as you want it to appear)",
+    country="Country / character name (from the game list)",
+    image="Attach your art file (PNG only)",
+)
+@app_commands.choices(
+    category=[app_commands.Choice(name=c, value=c) for c in CATEGORY_CHOICES]
+)
+async def submit_art(
+    interaction: discord.Interaction,
+    category: app_commands.Choice[str],
+    artist_name: str,
+    country: str,
+    image: discord.Attachment,
+):
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+    await interaction.followup.send(
+        "Step 1/3: Validating submission…",
+        ephemeral=True,
+    )
+
+    tmp_path: Optional[str] = None
+
+    try:
+        # --- 1) Enforce country must be from spreadsheet ---
+        try:
+            idx = await run_blocking(bot._load_index, timeout=30)  # AvailabilityIndex built from your sheet
+            valid_countries = set(idx.all_names)
+        except Exception as e:
+            logger.exception("Failed to load index for submit_art: %s", e)
+            await interaction.followup.send(
+                "❌ I couldn't load the country list from the sheet. Please try again later.",
+                ephemeral=True,
+            )
+            return
+
+        if country not in valid_countries:
+            await interaction.followup.send(
+                f"❌ `{country}` is not a valid country in the game list.\n"
+                "Please choose a country from the autocomplete suggestions.",
+                ephemeral=True,
+            )
+            return
+
+        # --- 2) Enforce PNG only ---
+        filename = image.filename or ""
+        _, ext = os.path.splitext(filename)
+        ext = ext.lower()
+
+        # Optionally also check content_type: image.content_type == "image/png"
+        if ext != ".png":
+            await interaction.followup.send(
+                "❌ Only **PNG** files are allowed.\n"
+                f"You uploaded `{filename}`.\n"
+                "Please export your art as a `.png` file and try again.",
+                ephemeral=True,
+            )
+            return
+
+        tmp_path = os.path.join(tempfile.gettempdir(), f"polandball_{uuid.uuid4()}{ext}")
+
+        await image.save(tmp_path)
+
+        service = interaction.client.drive_service
+        discord_username = interaction.user.name
+
+        await interaction.followup.send(
+            "Step 2/3: Uploading PNG to Google Drive…",
+            ephemeral=True,
+        )
+
+        try:
+            async def do_upload():
+                return await run_blocking(
+                    upload_art_to_drive,
+                    service,
+                    tmp_path,
+                    category=category.value,
+                    country=country,
+                    discord_username=discord_username,
+                    artist_name=artist_name,
+                    timeout=180,
+                )
+
+            drive_file, drive_path = await retry_run_blocking(do_upload)
+
+            await interaction.followup.send(
+                "Step 3/3: Finalizing Submission...",
+                ephemeral=True,
+            )
+
+            fire_emoji = get_custom_emoji(bot, "PoleonFire")
+            await interaction.followup.send(
+                "✅ **Submission received!**\n\n"
+                "Your art has been uploaded successfully.\n"
+                f"You'll be contacted if any changes are needed. Thank you for helping bring Polandball Go to life! {fire_emoji}",
+                ephemeral=True,
+            )
+            return
+
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()  # shows full error in your bot logs/console
+
+        await interaction.followup.send(
+            f"❌ Something went wrong while uploading your art:\n`{type(e).__name__}: {str(e) or repr(e)}`",
+            ephemeral=True,
+        )
 
 
 SPRITE_EXAMPLE_URL = "https://raw.githubusercontent.com/wwxiao09/polandball-art-helper/669d6100bce364b77d74b90885830fa85b6b0231/denmark.png"
@@ -1780,18 +1761,20 @@ async def submit_art_country_autocomplete(interaction: discord.Interaction, curr
     description="Show all bot commands and Polandball art guidelines",
 )
 async def help_command(interaction: discord.Interaction):
-    # CRITICAL: Defer immediately to avoid 3-second timeout
     try:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-    except (discord.errors.NotFound, discord.errors.HTTPException) as e:
-        logger.warning("Failed to defer help command (timeout): %s", e)
-        return
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
     except discord.InteractionResponded:
         pass
 
 
     # --- Commands section ---
     commands_text = (
+        "**/submit** – Submit art to Polandball Go\n"
+        "• `category` – **Sprite** or **Splash**\n"
+        "• `artist_name` – How you want to be credited in game\n"
+        "• `country` – Pick from the autocomplete list (only countries from the game sheet)\n"
+        "• `image` – **PNG only**\n\n"
         "**/available** `[character]`\n"
         "• No name → lists all characters that are available as sprites / splashes\n"
         "• With a name → shows if that character’s sprite/splash is available\n\n"
